@@ -1,66 +1,84 @@
 from dotenv import load_dotenv
+import os
 import asyncio
-from datetime import timedelta
 
 from student_bot import main as student_bot_main
 from admin_bot import main as admin_bot_main
 
-# Backstop import: run the reminder job once shortly after startup
-# (won't interfere with your in-file scheduling; it's just a safety net)
-from student_bot import check_subscriptions_and_send_reminders as run_student_reminders
-
 load_dotenv()
 
-async def main():
-    # Build apps
-    student_app = student_bot_main()
-    admin_app = await admin_bot_main(student_app)
+USE_WEBHOOK = os.getenv("USE_WEBHOOK", "0") == "1"
+PORT = int(os.getenv("PORT", "10000"))
+PUBLIC_URL = os.getenv("PUBLIC_URL")  # e.g. https://your-service.onrender.com
 
-    # Make sure we're not in webhook mode and clear any stale webhooks
+async def run_polling_both(student_app, admin_app):
+    # make sure no stale webhooks exist (and clear pending updates)
     await student_app.bot.delete_webhook(drop_pending_updates=True)
     await admin_app.bot.delete_webhook(drop_pending_updates=True)
 
-    # Sanity check: these must be different bots/tokens
-    student_me = await student_app.bot.get_me()
-    admin_me = await admin_app.bot.get_me()
-    assert student_me.id != admin_me.id, (
-        f"Both apps are using the same bot token (@{student_me.username}). "
+    # sanity check: tokens must be different
+    s_me = await student_app.bot.get_me()
+    a_me = await admin_app.bot.get_me()
+    assert s_me.id != a_me.id, (
+        f"Both apps are using the same bot token (@{s_me.username}). "
         "Set separate STUDENT_BOT_TOKEN and ADMIN_BOT_TOKEN."
     )
-    print(f"Student bot: @{student_me.username} | Admin bot: @{admin_me.username}")
+    print(f"Student bot: @{s_me.username} | Admin bot: @{a_me.username}")
 
-    # Initialize
-    await student_app.initialize()
-    await admin_app.initialize()
+    # Run both bots concurrently (each manages its own Updater internally)
+    await asyncio.gather(
+        student_app.run_polling(drop_pending_updates=True),
+        admin_app.run_polling(drop_pending_updates=True),
+    )
 
-    # Start apps
-    await student_app.start()
-    await admin_app.start()
+async def run_webhooks_both(student_app, admin_app):
+    # webhook mode avoids getUpdates conflicts entirely
+    # use token as a unique secret path (simple & effective)
+    s_token = os.getenv("STUDENT_BOT_TOKEN")
+    a_token = os.getenv("ADMIN_BOT_TOKEN")
+    if not PUBLIC_URL:
+        raise RuntimeError("PUBLIC_URL must be set for webhook mode.")
 
-    # Start polling (one stream per app)
-    await student_app.updater.start_polling()
-    await admin_app.updater.start_polling()
+    # clear old webhooks and pending updates
+    await student_app.bot.delete_webhook(drop_pending_updates=True)
+    await admin_app.bot.delete_webhook(drop_pending_updates=True)
 
-    # --- Backstop: ensure reminders run once shortly after startup ---
-    # If the in-file scheduling used `when=0`, it can misfire during startup.
-    # This extra one-time run (5s later) with a grace window guarantees it fires.
-    if not student_app.job_queue.get_jobs_by_name("reminder_boot_backstop"):
-        student_app.job_queue.run_once(
-            run_student_reminders,
-            when=timedelta(seconds=5),
-            name="reminder_boot_backstop",
-            job_kwargs={"misfire_grace_time": 600},  # 10 min grace
-        )
+    s_me = await student_app.bot.get_me()
+    a_me = await admin_app.bot.get_me()
+    assert s_me.id != a_me.id, (
+        f"Both apps are using the same bot token (@{s_me.username}). "
+        "Set separate STUDENT_BOT_TOKEN and ADMIN_BOT_TOKEN."
+    )
+    print(f"Student bot: @{s_me.username} | Admin bot: @{a_me.username}")
+    print(f"Webhook URL base: {PUBLIC_URL} (PORT={PORT})")
 
-    try:
-        # Keep running
-        await asyncio.Future()
-    except (asyncio.CancelledError, KeyboardInterrupt):
-        pass
-    finally:
-        # Stop gracefully
-        await student_app.stop()
-        await admin_app.stop()
+    await asyncio.gather(
+        student_app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=s_token,
+            webhook_url=f"{PUBLIC_URL}/{s_token}",
+            drop_pending_updates=True,
+        ),
+        admin_app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,  # both can share the same port; different paths
+            url_path=a_token,
+            webhook_url=f"{PUBLIC_URL}/{a_token}",
+            drop_pending_updates=True,
+        ),
+    )
 
-if __name__ == '__main__':
+async def main():
+    # Build applications (your existing factories)
+    student_app = student_bot_main()
+    admin_app = await admin_bot_main(student_app)
+
+    # Choose polling or webhook
+    if USE_WEBHOOK:
+        await run_webhooks_both(student_app, admin_app)
+    else:
+        await run_polling_both(student_app, admin_app)
+
+if __name__ == "__main__":
     asyncio.run(main())
