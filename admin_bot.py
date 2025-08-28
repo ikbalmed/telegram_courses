@@ -214,7 +214,7 @@ EDIT_STUDENT = 'edit_student'
 DELETE_STUDENT = 'delete_student'
 ADD_NEW_STUDENT_SAME_NUMBER = 'add_new_student_same_number'
 
-# ========================= /add_student flow (kept) =========================
+# ========================= /add_student flow (kept + fixed) =========================
 @admin_only
 async def start_add_student(update: Update, context: ContextTypes.DEFAULT_TYPE):
     niveau = None
@@ -227,6 +227,7 @@ async def start_add_student(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     context.user_data['niveau'] = niveau
     context.user_data['new_flow'] = True
+    context.user_data['adding_same_phone'] = False  # default
 
     await update.message.reply_text("Please write the student name:")
     return NAME
@@ -234,11 +235,25 @@ async def start_add_student(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def handle_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['name'] = update.message.text.strip()
+
+    # If we're adding a new student WITH THE SAME PHONE NUMBER,
+    # skip asking for phone again & go straight to Telegram ID.
+    if context.user_data.get('adding_same_phone'):
+        await update.message.reply_text("Please enter the student's Telegram ID:")
+        return TELEGRAM_ID
+
     await update.message.reply_text("Please enter the student's phone number:")
     return PHONE
 
 @admin_only
 async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # In the normal path, we read the phone from the admin message.
+    # In the "same phone" path, we should NOT be here; but if we are, skip duplicate check.
+    if context.user_data.get('adding_same_phone'):
+        # Just reuse the previously stored phone and continue.
+        await update.message.reply_text("Please enter the student's Telegram ID:")
+        return TELEGRAM_ID
+
     phone = update.message.text.strip()
     context.user_data['phone'] = phone
 
@@ -335,7 +350,7 @@ async def handle_subscription_period(update: Update, context: ContextTypes.DEFAU
             return SUBSCRIPTION_PERIOD
 
     context.user_data['pending_student'] = {
-        'phone': context.user_data.get('phone', ''),
+        'phone': context.user_data.get('phone', ''),   # preserved in "same number" path
         'name': context.user_data.get('name', ''),
         'subjects': context.user_data.get('subjects', ''),
         'speciality': context.user_data.get('speciality', ''),
@@ -393,6 +408,7 @@ async def confirm_add_student(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.message.reply_text(f"Student added, but invite sending failed: {e}")
 
     context.user_data.pop('pending_student', None)
+    context.user_data['adding_same_phone'] = False  # reset flag
     await query.edit_message_text("Student added successfully!")
     return ConversationHandler.END
 
@@ -545,11 +561,8 @@ async def zoom_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 disable_web_page_preview=False
             )
             ok += 1
-        except Exception as e:
+        except Exception:
             fail += 1
-        # small throttle to be gentle with rate limits
-        # (feel free to adjust/remove)
-        # no await asyncio.sleep here to keep code simple/synchronous in PTB handler
 
     await query.edit_message_text(
         f"Done. Zoom link sent to {ok} student(s). Failed: {fail}."
@@ -605,11 +618,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def start_add_new_student_same_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Start adding a NEW student but keep the SAME phone number that was just checked.
+    We set a flag so the flow won't ask for phone (and won't run duplicate check again).
+    """
     query = update.callback_query
     await query.answer()
     phone = context.user_data.get('phone')
     if phone:
-        await query.edit_message_text(f"Adding new student with phone number: {phone}. Please enter the student's name:")
+        # set the flag and keep the phone value; next → ask for name only
+        context.user_data['adding_same_phone'] = True
+        await query.edit_message_text(
+            f"Adding new student with phone number: {phone}.\nPlease enter the student's name:"
+        )
         return NAME
     else:
         await query.edit_message_text("Could not retrieve phone number. Please start again with /add_student.")
@@ -653,7 +674,7 @@ async def handle_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('edit_column_index', None)
     return ConversationHandler.END
 
-# Renew/cancel kept (unchanged) — omitted for brevity if not used in your workflow
+# Renew/cancel kept (unchanged) — placeholders are valid no-ops
 @admin_only
 async def renew_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE): ...
 @admin_only
