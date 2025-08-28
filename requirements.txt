@@ -1,5 +1,6 @@
-python-dotenv
-google-api-python-client
 google-auth-httplib2
+python-telegram-bot>=20.7,<22
+google-api-python-client
+google-auth
 google-auth-oauthlib
-python-telegram-bot
+python-dotenv

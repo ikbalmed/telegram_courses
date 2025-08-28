@@ -1,6 +1,7 @@
 import os
 import re
 import logging
+import asyncio
 from typing import List, Set, Dict, Optional, Union
 from datetime import datetime, timedelta, date, time
 
@@ -15,7 +16,9 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters,
     Defaults,
+    JobQueue,        # <-- for Render fix
 )
+from telegram.request import HTTPXRequest
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
@@ -163,6 +166,34 @@ def _to_bool(v: object) -> bool:
         return False
     return str(v).strip().upper() == "TRUE"
 
+# ===================== Telegram send helpers (with retry) =====================
+
+async def send_text_retry(bot: Bot, chat_id: Union[int, str], text: str, *, parse_mode: Optional[str]=None, retries: int=3):
+    delay = 1.0
+    for i in range(retries):
+        try:
+            return await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, disable_web_page_preview=True)
+        except Exception as e:
+            if i == retries - 1:
+                logger.error(f"[send_text_retry] final failure: {e}")
+                raise
+            logger.warning(f"[send_text_retry] attempt {i+1} failed: {e}; retrying in {delay}s")
+            await asyncio.sleep(delay)
+            delay *= 2
+
+async def reply_text_retry(update: Update, text: str, *, parse_mode: Optional[str]=None, retries: int=3):
+    delay = 1.0
+    for i in range(retries):
+        try:
+            return await update.effective_message.reply_text(text, parse_mode=parse_mode, disable_web_page_preview=True)
+        except Exception as e:
+            if i == retries - 1:
+                logger.error(f"[reply_text_retry] final failure: {e}")
+                raise
+            logger.warning(f"[reply_text_retry] attempt {i+1} failed: {e}; retrying in {delay}s")
+            await asyncio.sleep(delay)
+            delay *= 2
+
 # ===================== Student data helpers =====================
 
 def _get_student_subjects_and_niveau(student_id: str) -> Optional[Dict[str, object]]:
@@ -186,7 +217,6 @@ def _get_student_subjects_and_niveau(student_id: str) -> Optional[Dict[str, obje
     headers = rows[0]
     logger.debug(f"[_get_student_subjects_and_niveau] Headers: {headers}")
 
-    # Robust indices
     id_idx = _header_index_alias(headers, ["ID"], contains_any=["id"])
     name_idx = _header_index_alias(headers, ["Student Name", "Name"], contains_any=["name"])
     subjects_idx = _header_index_alias(headers, ["Student Subjects", "Subjects"], contains_any=["subject"])
@@ -231,7 +261,44 @@ def _key_for(niveau: str, subject: str) -> str:
     normalized_subject = re.sub(r'\s+', '_', subject.strip())
     return f"{niveau}_{normalized_subject}"
 
-# ===================== Reminders job (10d + 3d) =====================
+# ===================== Kick helper =====================
+
+async def kick_student_from_subject_groups(bot: Bot, telegram_id: Union[str, int], niveau: str, subjects: List[str]) -> None:
+    """
+    Kick the given student from all subject groups matching keys '<niveau>_<subject>'.
+    Implemented as ban -> unban (classic "kick").
+    Requires the bot to be an admin in those groups.
+    """
+    try:
+        student_id_int = int(_chat_id(telegram_id))
+    except Exception:
+        logger.error(f"[kick] Invalid telegram_id for kick: {telegram_id!r}")
+        return
+
+    if not subjects or not niveau:
+        return
+
+    mapping = fetch_subject_channel_links()  # { key_lower: group_id }
+    total = 0
+    for subj in subjects:
+        key = _key_for(niveau, subj).lower()
+        gid = mapping.get(key)
+        if not gid:
+            logger.debug(f"[kick] No group id for key={key}")
+            continue
+        chat_id = _chat_id(gid)
+        try:
+            await bot.ban_chat_member(chat_id=chat_id, user_id=student_id_int)
+            # Unban to allow possible re-join after renewal (using new invite)
+            await bot.unban_chat_member(chat_id=chat_id, user_id=student_id_int)
+            total += 1
+            logger.info(f"[kick] Kicked user {student_id_int} from chat {chat_id} (key={key})")
+        except Exception as e:
+            logger.error(f"[kick] Failed to kick {student_id_int} from {chat_id} (key={key}): {e}")
+    if total == 0:
+        logger.debug(f"[kick] No kicks performed for user {telegram_id}")
+
+# ===================== Reminders job (10d + 3d + expiry kick) =====================
 
 async def check_subscriptions_and_send_reminders(context: ContextTypes.DEFAULT_TYPE):
     """
@@ -239,6 +306,7 @@ async def check_subscriptions_and_send_reminders(context: ContextTypes.DEFAULT_T
       - 10-day reminder when 2..10 days remain (and 10DaysReminder is FALSE)
       - 3-day reminder when 0..3 days remain (and 3DaysReminder is FALSE)
       - Expiry notice when already expired (and flips Subscription to FALSE)
+      - On expiry, kick the student from all subject groups for their Niveau/Subjects
     """
     sheets = setup_sheets()
     result = sheets.values().get(
@@ -254,7 +322,6 @@ async def check_subscriptions_and_send_reminders(context: ContextTypes.DEFAULT_T
     headers = rows[0]
     data_rows = rows[1:]
 
-    # Use exact names per your sheet
     def idx_exact(name: str) -> int:
         try:
             return headers.index(name)
@@ -262,14 +329,17 @@ async def check_subscriptions_and_send_reminders(context: ContextTypes.DEFAULT_T
             return -1
 
     id_idx           = idx_exact("ID")
-    # Allow End_Date / End Date
     end_date_idx     = _header_index_alias(headers, ["End_Date", "End Date"], contains_all=["end", "date"])
     subscription_idx = idx_exact("Subscription")
     ten_day_idx      = idx_exact("10DaysReminder")
     three_day_idx    = idx_exact("3DaysReminder")
+    # For kicking
+    niveau_idx       = _header_index_alias(headers, ["Niveau", "Level"], contains_any=["niveau", "level"])
+    subjects_idx     = _header_index_alias(headers, ["Student Subjects", "Subjects"], contains_any=["subject"])
 
     logger.debug(f"[reminders] idx -> ID:{id_idx}, End_Date:{end_date_idx}, "
-                 f"Subscription:{subscription_idx}, 10DaysReminder:{ten_day_idx}, 3DaysReminder:{three_day_idx}")
+                 f"Subscription:{subscription_idx}, 10DaysReminder:{ten_day_idx}, 3DaysReminder:{three_day_idx}, "
+                 f"Niveau:{niveau_idx}, Subjects:{subjects_idx}")
 
     if id_idx == -1 or end_date_idx == -1 or subscription_idx == -1:
         logger.error("[reminders] Missing required columns: need 'ID', 'End_Date', 'Subscription'.")
@@ -298,8 +368,10 @@ async def check_subscriptions_and_send_reminders(context: ContextTypes.DEFAULT_T
         ten_sent   = _to_bool(_safe_cell(row, ten_day_idx, False)) if ten_day_idx   != -1 else False
         three_sent = _to_bool(_safe_cell(row, three_day_idx, False)) if three_day_idx != -1 else False
 
+        # -------- Already expired: flip Subscription and kick --------
         if today > end_dt:
             if sub_status == "TRUE":
+                # 1) Flip subscription to FALSE
                 try:
                     sub_col = _col_letter(subscription_idx)
                     sheets.values().update(
@@ -308,26 +380,39 @@ async def check_subscriptions_and_send_reminders(context: ContextTypes.DEFAULT_T
                         valueInputOption="RAW",
                         body={"values": [["FALSE"]]}
                     ).execute()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.error(f"[reminders] Failed to mark subscription FALSE for row {sheet_row_num}: {e}")
+
+                # 2) Kick from all subject groups
                 try:
-                    await context.bot.send_message(
-                        chat_id=student_id,
-                        text="Your subscription has ended. Please renew to continue access."
+                    niveau = str(_safe_cell(row, niveau_idx, "") if niveau_idx != -1 else "").strip()
+                    subjects_csv = str(_safe_cell(row, subjects_idx, "") if subjects_idx != -1 else "")
+                    subjects = [s.strip() for s in subjects_csv.split(",") if s.strip()]
+                    await kick_student_from_subject_groups(context.bot, student_id, niveau, subjects)
+                except Exception as e:
+                    logger.error(f"[reminders] Kick flow failed for user {student_id}: {e}")
+
+                # 3) Notify student
+                try:
+                    await send_text_retry(
+                        context.bot, student_id,
+                        "Your subscription has ended. Access to class groups has been revoked. "
+                        "Please renew to regain access."
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.error(f"[reminders] Failed to DM expired student {student_id}: {e}")
             continue
 
+        # -------- Active subscriptions only below --------
         if sub_status != "TRUE":
             continue
 
+        # 10-day window
         if 2 <= days_left <= 10 and not ten_sent and ten_day_idx != -1:
             try:
-                await context.bot.send_message(
-                    chat_id=student_id,
-                    text=(f"Your subscription will expire on {end_dt.isoformat()}. "
-                          f"You have {days_left} day(s) left. Please renew soon!")
+                await send_text_retry(
+                    context.bot, student_id,
+                    f"Your subscription will expire on {end_dt.isoformat()}. You have {days_left} day(s) left. Please renew soon!"
                 )
                 col = _col_letter(ten_day_idx)
                 sheets.values().update(
@@ -336,15 +421,16 @@ async def check_subscriptions_and_send_reminders(context: ContextTypes.DEFAULT_T
                     valueInputOption="RAW",
                     body={"values": [["TRUE"]]}
                 ).execute()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"[reminders] Failed 10-day reminder for {student_id}: {e}")
 
+        # 3-day window
         if 0 <= days_left <= 3 and not three_sent and three_day_idx != -1:
             try:
                 msg = ("Your subscription expires today."
                        if days_left == 0 else
                        f"Your subscription will expire on {end_dt.isoformat()}. You have {days_left} day(s) left.")
-                await context.bot.send_message(chat_id=student_id, text=msg)
+                await send_text_retry(context.bot, student_id, msg)
                 col = _col_letter(three_day_idx)
                 sheets.values().update(
                     spreadsheetId=SPREADSHEET_ID,
@@ -352,10 +438,10 @@ async def check_subscriptions_and_send_reminders(context: ContextTypes.DEFAULT_T
                     valueInputOption="RAW",
                     body={"values": [["TRUE"]]}
                 ).execute()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"[reminders] Failed 3-day reminder for {student_id}: {e}")
 
-# ===================== Admin-bot helper =====================
+# ===================== Admin-bot helper (keep) =====================
 
 async def invite_student_to_subject_groups(bot: Bot, telegram_id: str, subject_keys_lower: List[str]) -> None:
     """
@@ -375,9 +461,10 @@ async def invite_student_to_subject_groups(bot: Bot, telegram_id: str, subject_k
                 chat_id=chat_id,
                 creates_join_request=True
             )
-            await bot.send_message(
-                chat_id=int(telegram_id),
-                text=f"Here is your invite link for {key}: {invite_link.invite_link}"
+            await send_text_retry(
+                bot,
+                int(_chat_id(telegram_id)),
+                f"Here is your invite link for {key}: {invite_link.invite_link}"
             )
         except Exception as e:
             logger.error(f"[invite_student_to_subject_groups] Could not send invite for {key} to {telegram_id}: {e}")
@@ -388,15 +475,21 @@ def _is_admin(user_id: Optional[int]) -> bool:
     return bool(user_id and user_id in ADMIN_IDS)
 
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"Your ID is: {update.effective_user.id}")
+    await reply_text_retry(update, f"Your ID is: {update.effective_user.id}")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "Available commands:\n"
         "/subjects - View your subjects with invite links\n"
         "/subscription - Check subscription status\n"
+        "/set - (in a group) Map this group to a {Niveau}_{Subject} key\n"
+        "/debug_subjects [telegram_id] - (admin) Show debug info for subject lookup"
     )
-    await update.message.reply_text(help_text)
+    await reply_text_retry(update, help_text)
+
+# /start behaves like /help
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await help_command(update, context)
 
 async def view_subjects(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -410,7 +503,7 @@ async def view_subjects(update: Update, context: ContextTypes.DEFAULT_TYPE):
     info = _get_student_subjects_and_niveau(student_id)
     if not info:
         logger.debug(f"[/subjects] _get_student_subjects_and_niveau returned None for {student_id}")
-        await update.message.reply_text("Could not retrieve your subjects. Please try again or contact support.")
+        await reply_text_retry(update, "Could not retrieve your subjects. Please try again or contact support.")
         return
 
     subjects: List[str] = info["subjects"]  # type: ignore
@@ -418,10 +511,10 @@ async def view_subjects(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.debug(f"[/subjects] Found info: niveau={niveau!r}, subjects={subjects}")
 
     if not subjects:
-        await update.message.reply_text("You currently have no subjects on file.")
+        await reply_text_retry(update, "You currently have no subjects on file.")
         return
     if not niveau:
-        await update.message.reply_text("Your level (Niveau) is missing in the system. Please contact the admin.")
+        await reply_text_retry(update, "Your level (Niveau) is missing in the system. Please contact the admin.")
         return
 
     subject_map = fetch_subject_channel_links()
@@ -448,7 +541,7 @@ async def view_subjects(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"- {subj}: (no channel yet)")
 
     header = "Your subjects (click to join):" if had_any_link else "Your subjects:"
-    await update.message.reply_text("\n".join([header] + lines))
+    await reply_text_retry(update, "\n".join([header] + lines))
 
 async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sheets = setup_sheets()
@@ -501,11 +594,11 @@ async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except Exception:
             subscription_info += "(Could not parse dates)\n"
 
-        await update.message.reply_text(subscription_info)
+        await reply_text_retry(update, subscription_info)
     else:
-        await update.message.reply_text("Could not retrieve your subscription status. Please try again or contact support.")
+        await reply_text_retry(update, "Could not retrieve your subscription status. Please try again or contact support.")
 
-# ===================== /set conversation with conflict check (HTML formatting) =====================
+# ===================== /set conversation with conflict check =====================
 
 async def _is_admin_for_set(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     chat = update.effective_chat
@@ -522,30 +615,29 @@ async def _is_admin_for_set(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def set_channel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
-    msg = update.effective_message
     uid = update.effective_user.id if update.effective_user else None
     logger.debug(f"[/set] start in chat_id={chat.id if chat else None}, by user_id={uid}")
 
     if chat.type not in ("group", "supergroup"):
-        await msg.reply_text("Please run /set inside the target group or supergroup.")
+        await reply_text_retry(update, "Please run /set inside the target group or supergroup.")
         return ConversationHandler.END
 
     if not await _is_admin_for_set(update, context):
-        await msg.reply_text("Admins only. You must be a group admin or listed in ADMIN_IDS.")
+        await reply_text_retry(update, "Admins only. You must be a group admin or listed in ADMIN_IDS.")
         return ConversationHandler.END
 
-    await msg.reply_text("Which Niveau do you want to set for this group? (e.g., 1AS, 2AS, 3AS)")
+    await reply_text_retry(update, "Which Niveau do you want to set for this group? (e.g., 1AS, 2AS, 3AS)")
     return SET_NIVEAU
 
 async def set_channel_get_niveau(update: Update, context: ContextTypes.DEFAULT_TYPE):
     niveau = str(update.message.text).strip().upper()
     logger.debug(f"[/set] received niveau={niveau!r}")
     if not niveau:
-        await update.message.reply_text("Please provide a valid Niveau, e.g., 3AS.")
+        await reply_text_retry(update, "Please provide a valid Niveau, e.g., 3AS.")
         return SET_NIVEAU
 
     context.user_data['set_niveau'] = niveau
-    await update.message.reply_text(f"Great. Which Subject should map to this group for {niveau}? (e.g., Math, English)")
+    await reply_text_retry(update, f"Great. Which Subject should map to this group for {niveau}? (e.g., Math, English)")
     return SET_SUBJECT
 
 async def set_channel_get_subject(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -553,7 +645,7 @@ async def set_channel_get_subject(update: Update, context: ContextTypes.DEFAULT_
     subject = str(update.message.text).strip()
     logger.debug(f"[/set] received subject={subject!r} in chat_id={chat.id if chat else None}")
     if not subject:
-        await update.message.reply_text("Please provide a valid subject, e.g., Math.")
+        await reply_text_retry(update, "Please provide a valid subject, e.g., Math.")
         return SET_SUBJECT
 
     niveau = context.user_data.get('set_niveau', '')
@@ -563,22 +655,26 @@ async def set_channel_get_subject(update: Update, context: ContextTypes.DEFAULT_
 
     try:
         sheets = setup_sheets()
-        res = sheets.values().get(
-            spreadsheetId=SPREADSHEET_ID,
-            range=f"{SUBJECTS_CHANNEL_TABLE_NAME}!A:B",
-            valueRenderOption="FORMATTED_VALUE",
-        ).execute()
+        # Run the blocking Sheets read in a thread
+        res = await asyncio.to_thread(
+            lambda: sheets.values().get(
+                spreadsheetId=SPREADSHEET_ID,
+                range=f"{SUBJECTS_CHANNEL_TABLE_NAME}!A:B",
+                valueRenderOption="FORMATTED_VALUE",
+            ).execute()
+        )
         values = res.get("values", []) or []
         logger.debug(f"[/set] Loaded {len(values)} rows from {SUBJECTS_CHANNEL_TABLE_NAME}")
 
         if not values:
-            # initialize header if sheet was empty
-            sheets.values().update(
-                spreadsheetId=SPREADSHEET_ID,
-                range=f"{SUBJECTS_CHANNEL_TABLE_NAME}!A1:B1",
-                valueInputOption="RAW",
-                body={"values": [["Subject", "Telegram Group ID"]]},
-            ).execute()
+            await asyncio.to_thread(
+                lambda: sheets.values().update(
+                    spreadsheetId=SPREADSHEET_ID,
+                    range=f"{SUBJECTS_CHANNEL_TABLE_NAME}!A1:B1",
+                    valueInputOption="RAW",
+                    body={"values": [["Subject", "Telegram Group ID"]]},
+                ).execute()
+            )
             values = [["Subject", "Telegram Group ID"]]
             logger.debug("[/set] Initialized header row for Subjects_Channels.")
 
@@ -610,42 +706,44 @@ async def set_channel_get_subject(update: Update, context: ContextTypes.DEFAULT_
                 [InlineKeyboardButton("Set anyway", callback_data="set_confirm_yes"),
                  InlineKeyboardButton("Cancel", callback_data="set_confirm_no")]
             ])
-            await update.message.reply_text(
+            # Send one message with markup (fix)
+            await update.effective_message.reply_text(
                 f"⚠️ This group is already assigned to <b>{conflict_key}</b>.\n"
                 f"Do you want to set it anyway to <b>{key_canonical}</b>?",
-                reply_markup=kb,
-                parse_mode="HTML"
+                parse_mode="HTML",
+                reply_markup=kb
             )
             return SET_CONFIRM
 
         # No conflict → write immediately (HTML)
         if target_row_index is None:
-            sheets.values().append(
-                spreadsheetId=SPREADSHEET_ID,
-                range=f"{SUBJECTS_CHANNEL_TABLE_NAME}!A:B",
-                valueInputOption="RAW",
-                insertDataOption="INSERT_ROWS",
-                body={"values": [[key_canonical, chat_id_to_store]]},
-            ).execute()
-            await update.message.reply_text(
-                f"✅ Created and mapped <b>{key_canonical}</b> to this group.",
-                parse_mode="HTML"
+            await asyncio.to_thread(
+                lambda: sheets.values().append(
+                    spreadsheetId=SPREADSHEET_ID,
+                    range=f"{SUBJECTS_CHANNEL_TABLE_NAME}!A:B",
+                    valueInputOption="RAW",
+                    insertDataOption="INSERT_ROWS",
+                    body={"values": [[key_canonical, chat_id_to_store]]},
+                ).execute()
             )
+            await reply_text_retry(update, f"✅ Created and mapped <b>{key_canonical}</b> to this group.", parse_mode="HTML")
         else:
-            sheets.values().update(
-                spreadsheetId=SPREADSHEET_ID,
-                range=f"{SUBJECTS_CHANNEL_TABLE_NAME}!B{target_row_index}",
-                valueInputOption="RAW",
-                body={"values": [[chat_id_to_store]]},
-            ).execute()
-            await update.message.reply_text(
-                f"✅ Updated mapping for <b>{key_canonical}</b> to this group.",
-                parse_mode="HTML"
+            await asyncio.to_thread(
+                lambda: sheets.values().update(
+                    spreadsheetId=SPREADSHEET_ID,
+                    range=f"{SUBJECTS_CHANNEL_TABLE_NAME}!B{target_row_index}",
+                    valueInputOption="RAW",
+                    body={"values": [[chat_id_to_store]]},
+                ).execute()
             )
+            await reply_text_retry(update, f"✅ Updated mapping for <b>{key_canonical}</b> to this group.", parse_mode="HTML")
 
     except Exception as e:
         logger.exception("[/set] Exception while setting channel:")
-        await update.message.reply_text(f"❌ Failed to set channel id: {e}")
+        try:
+            await reply_text_retry(update, f"❌ Failed to set channel id: {e}")
+        except Exception:
+            pass
 
     context.user_data.pop('set_niveau', None)
     return ConversationHandler.END
@@ -675,24 +773,28 @@ async def set_channel_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
         chat_id_to_store = pending['chat_id_to_store']
 
         if target_row_index is None:
-            sheets.values().append(
-                spreadsheetId=SPREADSHEET_ID,
-                range=f"{SUBJECTS_CHANNEL_TABLE_NAME}!A:B",
-                valueInputOption="RAW",
-                insertDataOption="INSERT_ROWS",
-                body={"values": [[key_canonical, chat_id_to_store]]},
-            ).execute()
+            await asyncio.to_thread(
+                lambda: sheets.values().append(
+                    spreadsheetId=SPREADSHEET_ID,
+                    range=f"{SUBJECTS_CHANNEL_TABLE_NAME}!A:B",
+                    valueInputOption="RAW",
+                    insertDataOption="INSERT_ROWS",
+                    body={"values": [[key_canonical, chat_id_to_store]]},
+                ).execute()
+            )
             await query.edit_message_text(
                 f"✅ Created and mapped <b>{key_canonical}</b> to this group (despite existing assignment).",
                 parse_mode="HTML"
             )
         else:
-            sheets.values().update(
-                spreadsheetId=SPREADSHEET_ID,
-                range=f"{SUBJECTS_CHANNEL_TABLE_NAME}!B{target_row_index}",
-                valueInputOption="RAW",
-                body={"values": [[chat_id_to_store]]},
-            ).execute()
+            await asyncio.to_thread(
+                lambda: sheets.values().update(
+                    spreadsheetId=SPREADSHEET_ID,
+                    range=f"{SUBJECTS_CHANNEL_TABLE_NAME}!B{target_row_index}",
+                    valueInputOption="RAW",
+                    body={"values": [[chat_id_to_store]]},
+                ).execute()
+            )
             await query.edit_message_text(
                 f"✅ Updated mapping for <b>{key_canonical}</b> to this group (despite existing assignment).",
                 parse_mode="HTML"
@@ -700,7 +802,10 @@ async def set_channel_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     except Exception as e:
         logger.exception("[/set_confirm] Exception while confirming set:")
-        await query.edit_message_text(f"❌ Failed to set channel id: {e}")
+        try:
+            await query.edit_message_text(f"❌ Failed to set channel id: {e}")
+        except Exception:
+            pass
 
     finally:
         context.user_data.pop('pending_set', None)
@@ -711,7 +816,7 @@ async def set_channel_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def set_channel_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('pending_set', None)
     context.user_data.pop('set_niveau', None)
-    await update.message.reply_text("Cancelled.")
+    await reply_text_retry(update, "Cancelled.")
     return ConversationHandler.END
 
 # ===================== Admin debug command =====================
@@ -720,13 +825,14 @@ async def debug_subjects(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin-only: /debug_subjects [telegram_id] — show what we read & how we match."""
     uid = update.effective_user.id if update.effective_user else None
     if not _is_admin(uid):
-        await update.message.reply_text("Admins only.")
+        await reply_text_retry(update, "Admins only.")
         return
 
     target_id = context.args[0] if context.args else str(uid)
     info = _get_student_subjects_and_niveau(str(target_id))
     if info is None:
-        await update.message.reply_text(
+        await reply_text_retry(
+            update,
             f"DEBUG: No match for ID={target_id}.\n"
             f"- Check sheet '{STUDENT_TABLE_NAME}' headers include (or resemble): ID, Student Subjects, Niveau, Subscription\n"
             f"- Ensure the ID cell exactly matches {target_id} (we normalize 123.0 -> '123').\n"
@@ -734,7 +840,8 @@ async def debug_subjects(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await update.message.reply_text(
+    await reply_text_retry(
+        update,
         "DEBUG RESULT:\n"
         f"- ID: {target_id}\n"
         f"- Name: {info.get('name')}\n"
@@ -743,10 +850,34 @@ async def debug_subjects(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"- Subscription: {info.get('subscription')}"
     )
 
+# ===================== Render fix: post_init schedules =====================
+
+async def _post_init(app: Application):
+    # Schedule after the app is fully initialized so job_queue is ready
+    app.job_queue.run_once(check_subscriptions_and_send_reminders, when=0)
+    app.job_queue.run_daily(check_subscriptions_and_send_reminders, time(hour=9, minute=0))
+
 # ===================== App factory =====================
 
 def main():
-    builder = Application.builder().token(os.getenv("STUDENT_BOT_TOKEN"))
+    # Extend Telegram HTTP timeouts and pool limits to avoid transient "Timed out"
+    req = HTTPXRequest(
+        connection_pool_size=50,
+        connect_timeout=20.0,
+        read_timeout=40.0,
+        write_timeout=40.0,
+        pool_timeout=20.0,
+    )
+
+    jq = JobQueue()  # <-- ensure job queue exists (Render fix)
+
+    builder = (
+        Application.builder()
+        .token(os.getenv("STUDENT_BOT_TOKEN"))
+        .request(req)
+        .job_queue(jq)          # <-- inject JobQueue
+        .post_init(_post_init)  # <-- schedule jobs after init
+    )
     if ZoneInfo is not None:
         builder = builder.defaults(Defaults(tzinfo=ZoneInfo("Africa/Algiers")))
     application = builder.build()
@@ -770,22 +901,15 @@ def main():
         allow_reentry=True,
     )
 
+    # Handlers
     application.add_handler(set_conv)
-
-    # Simple commands
     application.add_handler(CommandHandler("subjects", view_subjects))
     application.add_handler(CommandHandler("subscription", check_subscription))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("start", start))  # /start behaves like /help
     application.add_handler(CommandHandler("myid", myid))
     application.add_handler(CommandHandler("debug_subjects", debug_subjects))
-    application.add_handler(CommandHandler("start", help_command))
 
-
-    # Reminders
-    application.job_queue.run_once(check_subscriptions_and_send_reminders, 0)
-    application.job_queue.run_daily(
-        check_subscriptions_and_send_reminders,
-        time(hour=9, minute=0)
-    )
+    # NOTE: do NOT schedule jobs here; they're now in _post_init (Render fix)
 
     return application
