@@ -1,22 +1,19 @@
-from dotenv import load_dotenv
+# main.py
 import os
 import asyncio
+from dotenv import load_dotenv
 
 from student_bot import main as student_bot_main
 from admin_bot import main as admin_bot_main
 
 load_dotenv()
 
-USE_WEBHOOK = os.getenv("USE_WEBHOOK", "0") == "1"
-PORT = int(os.getenv("PORT", "10000"))
-PUBLIC_URL = os.getenv("PUBLIC_URL")  # e.g. https://your-service.onrender.com
-
-async def run_polling_both(student_app, admin_app):
-    # make sure no stale webhooks exist (and clear pending updates)
+async def run_both_polling(student_app, admin_app):
+    # 1) Clean slate: drop webhooks & pending updates for both bots
     await student_app.bot.delete_webhook(drop_pending_updates=True)
     await admin_app.bot.delete_webhook(drop_pending_updates=True)
 
-    # sanity check: tokens must be different
+    # 2) Sanity check: different tokens/users
     s_me = await student_app.bot.get_me()
     a_me = await admin_app.bot.get_me()
     assert s_me.id != a_me.id, (
@@ -25,60 +22,53 @@ async def run_polling_both(student_app, admin_app):
     )
     print(f"Student bot: @{s_me.username} | Admin bot: @{a_me.username}")
 
-    # Run both bots concurrently (each manages its own Updater internally)
-    await asyncio.gather(
-        student_app.run_polling(drop_pending_updates=True),
-        admin_app.run_polling(drop_pending_updates=True),
-    )
+    # 3) Initialize + start both apps
+    await student_app.initialize()
+    await admin_app.initialize()
+    await student_app.start()
+    await admin_app.start()
 
-async def run_webhooks_both(student_app, admin_app):
-    # webhook mode avoids getUpdates conflicts entirely
-    # use token as a unique secret path (simple & effective)
-    s_token = os.getenv("STUDENT_BOT_TOKEN")
-    a_token = os.getenv("ADMIN_BOT_TOKEN")
-    if not PUBLIC_URL:
-        raise RuntimeError("PUBLIC_URL must be set for webhook mode.")
+    # 4) Start polling for both (one updater per app)
+    await student_app.updater.start_polling()
+    await admin_app.updater.start_polling()
 
-    # clear old webhooks and pending updates
-    await student_app.bot.delete_webhook(drop_pending_updates=True)
-    await admin_app.bot.delete_webhook(drop_pending_updates=True)
-
-    s_me = await student_app.bot.get_me()
-    a_me = await admin_app.bot.get_me()
-    assert s_me.id != a_me.id, (
-        f"Both apps are using the same bot token (@{s_me.username}). "
-        "Set separate STUDENT_BOT_TOKEN and ADMIN_BOT_TOKEN."
-    )
-    print(f"Student bot: @{s_me.username} | Admin bot: @{a_me.username}")
-    print(f"Webhook URL base: {PUBLIC_URL} (PORT={PORT})")
-
-    await asyncio.gather(
-        student_app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=s_token,
-            webhook_url=f"{PUBLIC_URL}/{s_token}",
-            drop_pending_updates=True,
-        ),
-        admin_app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,  # both can share the same port; different paths
-            url_path=a_token,
-            webhook_url=f"{PUBLIC_URL}/{a_token}",
-            drop_pending_updates=True,
-        ),
-    )
+    # 5) Run forever until cancelled (Render sends SIGTERM on redeploy)
+    stop_event = asyncio.Event()
+    try:
+        await stop_event.wait()
+    finally:
+        # 6) Graceful shutdown — IMPORTANT to await these to avoid warnings
+        try:
+            await student_app.updater.stop()
+        except Exception:
+            pass
+        try:
+            await admin_app.updater.stop()
+        except Exception:
+            pass
+        try:
+            await student_app.stop()
+            await admin_app.stop()
+        finally:
+            # Ensure full cleanup (prevents "coroutine never awaited")
+            try:
+                await student_app.shutdown()
+            except Exception:
+                pass
+            try:
+                await admin_app.shutdown()
+            except Exception:
+                pass
 
 async def main():
-    # Build applications (your existing factories)
+    # Build apps from your factories (they return Application instances)
     student_app = student_bot_main()
     admin_app = await admin_bot_main(student_app)
 
-    # Choose polling or webhook
-    if USE_WEBHOOK:
-        await run_webhooks_both(student_app, admin_app)
-    else:
-        await run_polling_both(student_app, admin_app)
+    # POLLING mode for Render (simple & reliable)
+    await run_both_polling(student_app, admin_app)
 
 if __name__ == "__main__":
+    # Use asyncio.run so the loop is created & closed by Python,
+    # and we don't try to close a running loop ourselves.
     asyncio.run(main())
