@@ -693,8 +693,8 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("Operation cancelled.")
     return ConversationHandler.END
 
-# ========================= Application factory =========================
-async def main(student_app=None):
+# =====start_edit_student, pattern="^" + EDIT_STUDENT + "_student_"),
+def main(student_app=None):
     token = os.getenv("ADMIN_BOT_TOKEN")
     application = Application.builder().token(token).build()
 
@@ -728,7 +728,6 @@ async def main(student_app=None):
         },
         fallbacks=[CommandHandler("cancel", cancel, filters=ADMIN_FILTER)],
     )
-
     application.add_handler(conv_handler)
 
     # --- Reject non-admins ---
@@ -745,15 +744,15 @@ async def main(student_app=None):
 
     print(f"Admin bot started with {len(ADMIN_IDS)} admin(s).")
 
-    # --- Run as webhook ---
+    # --- Run as webhook (blocking) ---
     application.run_webhook(
         listen="0.0.0.0",
-        port=PORT,
-        url_path=WEBHOOK_PATH,
-        webhook_url=f"{WEBHOOK_URL}{WEBHOOK_PATH}",
+        port=int(os.getenv("PORT", "8080")),
+        url_path="admin-bot-webhook",
+        webhook_url=f"{os.getenv('WEBHOOK_URL')}admin-bot-webhook",
     )
 
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
+
