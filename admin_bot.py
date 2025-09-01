@@ -728,6 +728,7 @@ def main(student_app=None):
         },
         fallbacks=[CommandHandler("cancel", cancel, filters=ADMIN_FILTER)],
     )
+    admin_handler = [conv_handler]
     application.add_handler(conv_handler)
 
     # --- Reject non-admins ---
@@ -755,4 +756,5 @@ def main(student_app=None):
 
 if __name__ == "__main__":
     main()
+
 
