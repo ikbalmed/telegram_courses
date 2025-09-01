@@ -1,4 +1,3 @@
-# main.py
 import os
 import asyncio
 import threading
@@ -10,6 +9,7 @@ from admin_bot import main as admin_bot_main
 
 load_dotenv()
 
+# Health check for Render
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         body = b"ok"
@@ -19,7 +19,6 @@ class _HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    # Silence default request logging
     def log_message(self, fmt, *args):
         pass
 
@@ -31,11 +30,11 @@ def start_health_server():
     print(f"[health] Listening on 0.0.0.0:{port} for Render health checks.")
     return server
 
-async def run_both_polling(student_app, admin_app):
-    await student_app.bot.delete_webhook(drop_pending_updates=True)
-    await admin_app.bot.delete_webhook(drop_pending_updates=True)
+async def run_both_webhooks(student_app, admin_app):
+    port = int(os.getenv("PORT", "10000"))
+    render_url = os.getenv("RENDER_EXTERNAL_URL")  # set this in Render dashboard
 
-    # Sanity: tokens must be different
+    # Sanity check
     s_me = await student_app.bot.get_me()
     a_me = await admin_app.bot.get_me()
     assert s_me.id != a_me.id, (
@@ -44,39 +43,40 @@ async def run_both_polling(student_app, admin_app):
     )
     print(f"Student bot: @{s_me.username} | Admin bot: @{a_me.username}")
 
+    # Remove polling
     await student_app.initialize()
     await admin_app.initialize()
+
     await student_app.start()
     await admin_app.start()
 
-    await student_app.updater.start_polling()
-    await admin_app.updater.start_polling()
+    # Setup webhook for each bot
+    await student_app.bot.set_webhook(f"{render_url}/student/{student_app.bot.token}")
+    await admin_app.bot.set_webhook(f"{render_url}/admin/{admin_app.bot.token}")
+
+    # Start webhook servers
+    await student_app.updater.start_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=student_app.bot.token,
+        webhook_url=f"{render_url}/student/{student_app.bot.token}"
+    )
+    await admin_app.updater.start_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=admin_app.bot.token,
+        webhook_url=f"{render_url}/admin/{admin_app.bot.token}"
+    )
 
     try:
         await asyncio.Event().wait()
     finally:
-        try:
-            await student_app.updater.stop()
-        except Exception:
-            pass
-        try:
-            await admin_app.updater.stop()
-        except Exception:
-            pass
-        try:
-            await student_app.stop()
-        finally:
-            try:
-                await student_app.shutdown()
-            except Exception:
-                pass
-        try:
-            await admin_app.stop()
-        finally:
-            try:
-                await admin_app.shutdown()
-            except Exception:
-                pass
+        await student_app.updater.stop()
+        await admin_app.updater.stop()
+        await student_app.stop()
+        await admin_app.stop()
+        await student_app.shutdown()
+        await admin_app.shutdown()
 
 async def main():
     http_server = start_health_server()
@@ -85,7 +85,7 @@ async def main():
     admin_app = await admin_bot_main(student_app)
 
     try:
-        await run_both_polling(student_app, admin_app)
+        await run_both_webhooks(student_app, admin_app)
     finally:
         try:
             http_server.shutdown()
@@ -94,4 +94,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
