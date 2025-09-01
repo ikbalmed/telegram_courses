@@ -1,5 +1,5 @@
 google-auth-httplib2
-python-telegram-bot[job-queue]>=20.7,<22
+python-telegram-bot[webhooks,job-queue]>=20.7,<22
 google-api-python-client
 google-auth
 google-auth-oauthlib
