@@ -25,7 +25,8 @@ except Exception:
     ZoneInfo = None  # On 3.8, install backports.zoneinfo and import from there
 
 load_dotenv()
-
+WEBHOOK_URL = "https://telegram-courses.onrender.com"
+WEBHOOK_PATH = "/webhook/telegram_student"
 # ========================= Logging =========================
 
 logger = logging.getLogger("student_bot")
@@ -750,28 +751,51 @@ async def debug_subjects(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===================== App factory =====================
 
-def main():
+async def main():
     builder = Application.builder().token(os.getenv("STUDENT_BOT_TOKEN"))
     if ZoneInfo is not None:
         builder = builder.defaults(Defaults(tzinfo=ZoneInfo("Africa/Algiers")))
     application = builder.build()
 
+    # Set webhook
+    await application.bot.set_webhook(
+        url=f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+    )
+
     # Conversation for /set
     set_conv = ConversationHandler(
-        entry_points=[CommandHandler("set", set_channel_start, filters=(filters.ChatType.GROUPS & ~filters.SenderChat()))],
+        entry_points=[
+            CommandHandler(
+                "set",
+                set_channel_start,
+                filters=(filters.ChatType.GROUPS & ~filters.SenderChat()),
+            )
+        ],
         states={
             SET_NIVEAU: [
-                MessageHandler(filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, set_channel_get_niveau)
+                MessageHandler(
+                    filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,
+                    set_channel_get_niveau,
+                )
             ],
             SET_SUBJECT: [
-                MessageHandler(filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, set_channel_get_subject),
-                CallbackQueryHandler(set_channel_confirm, pattern=r"^set_confirm_(yes|no)$"),
+                MessageHandler(
+                    filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,
+                    set_channel_get_subject,
+                ),
+                CallbackQueryHandler(
+                    set_channel_confirm, pattern=r"^set_confirm_(yes|no)$"
+                ),
             ],
             SET_CONFIRM: [
-                CallbackQueryHandler(set_channel_confirm, pattern=r"^set_confirm_(yes|no)$"),
+                CallbackQueryHandler(
+                    set_channel_confirm, pattern=r"^set_confirm_(yes|no)$"
+                ),
             ],
         },
-        fallbacks=[CommandHandler("cancel", set_channel_cancel, filters=filters.ChatType.GROUPS)],
+        fallbacks=[
+            CommandHandler("cancel", set_channel_cancel, filters=filters.ChatType.GROUPS)
+        ],
         allow_reentry=True,
     )
 
@@ -789,7 +813,18 @@ def main():
     application.job_queue.run_once(check_subscriptions_and_send_reminders, 0)
     application.job_queue.run_daily(
         check_subscriptions_and_send_reminders,
-        time(hour=9, minute=0)
+        time(hour=9, minute=0),
     )
 
-    return application
+    # Run application with webhook
+    await application.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.getenv("PORT", 8443)),
+        url_path=WEBHOOK_PATH,
+        webhook_url=f"{WEBHOOK_URL}{WEBHOOK_PATH}",
+    )
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+
