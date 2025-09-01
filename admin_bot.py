@@ -18,6 +18,11 @@ from googleapiclient.discovery import build
 from student_bot import invite_student_to_subject_groups
 
 load_dotenv()
+WEBHOOK_URL = "https://telegram-courses.onrender.com"
+WEBHOOK_PATH = "/telegram_admin"  # you can customize this
+PORT = int(os.environ.get("PORT", 8443))
+
+
 
 # ========================= Config =========================
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
@@ -693,45 +698,62 @@ async def main(student_app=None):
     token = os.getenv("ADMIN_BOT_TOKEN")
     application = Application.builder().token(token).build()
 
+    # --- Conversations ---
     conv_handler = ConversationHandler(
         entry_points=[
-            CommandHandler('add_student', start_add_student, filters=ADMIN_FILTER),
-            CommandHandler('zoom', zoom_start, filters=ADMIN_FILTER),
-            CallbackQueryHandler(start_edit_student, pattern='^' + EDIT_STUDENT + '_student_'),
-            CallbackQueryHandler(handle_callback, pattern='^' + DELETE_STUDENT + '_student_'),
-            CallbackQueryHandler(start_add_new_student_same_number, pattern='^' + ADD_NEW_STUDENT_SAME_NUMBER + '$'),
+            CommandHandler("add_student", start_add_student, filters=ADMIN_FILTER),
+            CommandHandler("zoom", zoom_start, filters=ADMIN_FILTER),
+            CallbackQueryHandler(start_edit_student, pattern="^" + EDIT_STUDENT + "_student_"),
+            CallbackQueryHandler(handle_callback, pattern="^" + DELETE_STUDENT + "_student_"),
+            CallbackQueryHandler(start_add_new_student_same_number, pattern="^" + ADD_NEW_STUDENT_SAME_NUMBER + "$"),
         ],
         states={
-            NAME:   [MessageHandler(ADMIN_FILTER & filters.TEXT & ~filters.COMMAND, handle_name)],
-            PHONE:  [MessageHandler(ADMIN_FILTER & filters.TEXT & ~filters.COMMAND, handle_phone)],
+            NAME: [MessageHandler(ADMIN_FILTER & filters.TEXT & ~filters.COMMAND, handle_name)],
+            PHONE: [MessageHandler(ADMIN_FILTER & filters.TEXT & ~filters.COMMAND, handle_phone)],
             TELEGRAM_ID: [MessageHandler(ADMIN_FILTER & filters.TEXT & ~filters.COMMAND, handle_telegram_id)],
-            SUBJECTS:    [MessageHandler(ADMIN_FILTER & filters.TEXT & ~filters.COMMAND, handle_subjects)],
-            SPECIALITY:  [MessageHandler(ADMIN_FILTER & filters.TEXT & ~filters.COMMAND, handle_speciality)],
-            PAYMENT:     [MessageHandler(ADMIN_FILTER & filters.TEXT & ~filters.COMMAND, handle_payment)],
+            SUBJECTS: [MessageHandler(ADMIN_FILTER & filters.TEXT & ~filters.COMMAND, handle_subjects)],
+            SPECIALITY: [MessageHandler(ADMIN_FILTER & filters.TEXT & ~filters.COMMAND, handle_speciality)],
+            PAYMENT: [MessageHandler(ADMIN_FILTER & filters.TEXT & ~filters.COMMAND, handle_payment)],
             SUBSCRIPTION_PERIOD: [MessageHandler(ADMIN_FILTER & filters.TEXT & ~filters.COMMAND, handle_subscription_period)],
-            CONFIRM_ADD: [CallbackQueryHandler(confirm_add_student, pattern=r'^confirm_add_(yes|no)$')],
+            CONFIRM_ADD: [CallbackQueryHandler(confirm_add_student, pattern=r"^confirm_add_(yes|no)$")],
 
-            EDIT_COLUMN: [CallbackQueryHandler(handle_edit_column, pattern='^edit_column_')],
-            EDIT_VALUE:  [MessageHandler(ADMIN_FILTER & filters.TEXT & ~filters.COMMAND, handle_edit_value)],
+            EDIT_COLUMN: [CallbackQueryHandler(handle_edit_column, pattern="^edit_column_")],
+            EDIT_VALUE: [MessageHandler(ADMIN_FILTER & filters.TEXT & ~filters.COMMAND, handle_edit_value)],
 
-            # /zoom
-            ZOOM_NIVEAU:  [MessageHandler(ADMIN_FILTER & filters.TEXT & ~filters.COMMAND, zoom_get_niveau)],
+            # Zoom
+            ZOOM_NIVEAU: [MessageHandler(ADMIN_FILTER & filters.TEXT & ~filters.COMMAND, zoom_get_niveau)],
             ZOOM_SUBJECT: [MessageHandler(ADMIN_FILTER & filters.TEXT & ~filters.COMMAND, zoom_get_subject)],
-            ZOOM_URL:     [MessageHandler(ADMIN_FILTER & filters.TEXT & ~filters.COMMAND, zoom_get_url)],
-            ZOOM_CONFIRM: [CallbackQueryHandler(zoom_confirm, pattern=r'^zoom_send_(yes|no)$')],
+            ZOOM_URL: [MessageHandler(ADMIN_FILTER & filters.TEXT & ~filters.COMMAND, zoom_get_url)],
+            ZOOM_CONFIRM: [CallbackQueryHandler(zoom_confirm, pattern=r"^zoom_send_(yes|no)$")],
         },
-        fallbacks=[CommandHandler('cancel', cancel, filters=ADMIN_FILTER)],
+        fallbacks=[CommandHandler("cancel", cancel, filters=ADMIN_FILTER)],
     )
 
     application.add_handler(conv_handler)
 
-    # Optional: reject non-admin DMs
+    # --- Reject non-admins ---
     async def _not_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _deny(update)
+
     if ADMIN_IDS:
         application.add_handler(
-            MessageHandler(filters.ChatType.PRIVATE & ~ADMIN_FILTER & (filters.TEXT | filters.COMMAND), _not_admin_message)
+            MessageHandler(
+                filters.ChatType.PRIVATE & ~ADMIN_FILTER & (filters.TEXT | filters.COMMAND),
+                _not_admin_message,
+            )
         )
 
     print(f"Admin bot started with {len(ADMIN_IDS)} admin(s).")
-    return application
+
+    # --- Run as webhook ---
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=WEBHOOK_PATH,
+        webhook_url=f"{WEBHOOK_URL}{WEBHOOK_PATH}",
+    )
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
