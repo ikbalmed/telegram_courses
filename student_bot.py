@@ -696,3 +696,29 @@ def main(updater_none: bool = False):
     application.job_queue.run_daily(check_subscriptions_and_send_reminders, time(hour=9, minute=0))
 
     return application
+# --- Optional warm-up for Render cold starts ---------------------------------
+import asyncio
+
+async def prewarm_clients():
+    """
+    Lazily mint Google credentials and do a tiny Sheets read so the first
+    real webhook doesn’t pay the cold-start cost. Safe to call multiple times.
+    """
+    def _sync():
+        try:
+            # Build client with cache disabled (avoids extra disk i/o and warnings)
+            creds = _load_gcp_credentials()
+            service = build('sheets', 'v4', credentials=creds, cache_discovery=False)
+
+            # Small, fast call: just A1 of Students sheet (works even if empty)
+            rng = f"{STUDENT_TABLE_NAME}!A1:A1"
+            service.spreadsheets().values().get(
+                spreadsheetId=SPREADSHEET_ID,
+                range=rng
+            ).execute()
+        except Exception as e:
+            # Warm-up is best-effort; never crash on failures
+            logger.warning("[prewarm_clients] Warm-up skipped/failed: %s", e)
+
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _sync)
