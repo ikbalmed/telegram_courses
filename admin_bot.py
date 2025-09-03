@@ -728,4 +728,31 @@ async def main(student_app=None, updater_none: bool = False):
         )
 
     print(f"Admin bot started with {len(ADMIN_IDS)} admin(s).")
-    return application
+    return application # --- Optional warm-up for Render cold starts (admin_bot) ----------------------
+import asyncio
+
+async def prewarm_clients():
+    """
+    Pre-initialize Google Sheets creds + client and touch both sheets so the
+    first real webhook doesn’t pay the cold-start cost. Safe to call multiple times.
+    """
+    def _sync():
+        try:
+            creds = _load_gcp_credentials()
+            # cache_discovery=False avoids extra disk I/O & warnings
+            service = build('sheets', 'v4', credentials=creds, cache_discovery=False)
+
+            # Tiny, fast reads just to establish TLS, mint tokens, etc.
+            service.spreadsheets().values().get(
+                spreadsheetId=SPREADSHEET_ID,
+                range=f"{STUDENTS_SHEET}!A1:A1"
+            ).execute()
+            service.spreadsheets().values().get(
+                spreadsheetId=SPREADSHEET_ID,
+                range=f"{SUBJECTS_CHANNELS_SHEET}!A1:A1"
+            ).execute()
+        except Exception as e:
+            logger.warning("[admin_bot prewarm_clients] Warm-up skipped/failed: %s", e)
+
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _sync)
