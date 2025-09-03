@@ -78,7 +78,7 @@ def _load_gcp_credentials() -> Credentials:
 
 def setup_sheets():
     creds = _load_gcp_credentials()
-    service = build('sheets', 'v4', credentials=creds)
+    service = build('sheets', 'v4', credentials=creds, cache_discovery=False)
     return service.spreadsheets()
 
 def fetch_subject_channel_links() -> Dict[str, str]:
@@ -722,3 +722,4 @@ async def prewarm_clients():
 
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _sync)
+
