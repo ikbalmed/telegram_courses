@@ -99,10 +99,9 @@ async def handle_student(request: web.Request):
     if not apps_ready.is_set():
         # Kick off init + prewarm, but ACK quickly to trigger Telegram retry
         asyncio.create_task(init_apps())
-        # Prewarm Google clients right away in parallel
-        loop = asyncio.get_event_loop()
-        loop.run_in_executor(None, student_prewarm)
-        loop.run_in_executor(None, admin_prewarm)
+        # Prewarm Google clients right away in parallel (async)
+        asyncio.create_task(student_prewarm())
+        asyncio.create_task(admin_prewarm())
         try:
             await asyncio.wait_for(apps_ready.wait(), timeout=8)
         except asyncio.TimeoutError:
@@ -119,9 +118,8 @@ async def handle_admin(request: web.Request):
 
     if not apps_ready.is_set():
         asyncio.create_task(init_apps())
-        loop = asyncio.get_event_loop()
-        loop.run_in_executor(None, student_prewarm)
-        loop.run_in_executor(None, admin_prewarm)
+        asyncio.create_task(student_prewarm())
+        asyncio.create_task(admin_prewarm())
         try:
             await asyncio.wait_for(apps_ready.wait(), timeout=8)
         except asyncio.TimeoutError:
@@ -133,9 +131,8 @@ async def handle_admin(request: web.Request):
 async def on_startup(app: web.Application):
     # Start warming immediately so the first webhook is fast
     asyncio.create_task(init_apps())
-    loop = asyncio.get_event_loop()
-    loop.run_in_executor(None, student_prewarm)
-    loop.run_in_executor(None, admin_prewarm)
+    asyncio.create_task(student_prewarm())
+    asyncio.create_task(admin_prewarm())
     log.info("Server booted. Paths:\n  %s%s\n  %s%s",
              PUBLIC_URL, STUDENT_PATH, PUBLIC_URL, ADMIN_PATH)
 
