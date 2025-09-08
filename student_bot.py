@@ -1,4 +1,3 @@
-
 # student_bot.py
 import os
 import re
@@ -276,13 +275,14 @@ async def check_subscriptions_and_send_reminders(context: ContextTypes.DEFAULT_T
                     ).execute()
                 except Exception:
                     pass
-                try:
-                    await context.bot.send_message(
-                        chat_id=student_id,
-                        text="Your subscription has ended. Please renew to continue access."
-                    )
-                except Exception:
-                    pass
+            # Notify expiration (Arabic)
+            try:
+                await context.bot.send_message(
+                    chat_id=student_id,
+                    text="انتهى اشتراكك. يُرجى التجديد لمواصلة الوصول."
+                )
+            except Exception:
+                pass
             continue
 
         if sub_status != "TRUE":
@@ -292,8 +292,8 @@ async def check_subscriptions_and_send_reminders(context: ContextTypes.DEFAULT_T
             try:
                 await context.bot.send_message(
                     chat_id=student_id,
-                    text=(f"Your subscription will expire on {end_dt.isoformat()}. "
-                          f"You have {days_left} day(s) left. Please renew soon!")
+                    text=(f"سينتهي اشتراكك في {end_dt.isoformat()}. "
+                          f"تبقّى {days_left} يوم/أيام. يُرجى التجديد قريبًا!")
                 )
                 col = _col_letter(ten_day_idx)
                 sheets.values().update(
@@ -307,9 +307,9 @@ async def check_subscriptions_and_send_reminders(context: ContextTypes.DEFAULT_T
 
         if 0 <= days_left <= 3 and not three_sent and three_day_idx != -1:
             try:
-                msg = ("Your subscription expires today."
+                msg = ("ينتهي اشتراكك اليوم."
                        if days_left == 0 else
-                       f"Your subscription will expire on {end_dt.isoformat()}. You have {days_left} day(s) left.")
+                       f"سينتهي اشتراكك في {end_dt.isoformat()}. تبقّى {days_left} يوم/أيام.")
                 await context.bot.send_message(chat_id=student_id, text=msg)
                 col = _col_letter(three_day_idx)
                 sheets.values().update(
@@ -339,7 +339,7 @@ async def invite_student_to_subject_groups(bot: Bot, telegram_id: str, subject_k
             )
             await bot.send_message(
                 chat_id=int(telegram_id),
-                text=f"Here is your invite link for {key}: {invite_link.invite_link}"
+                text=f"هذا رابط الدعوة لـ {key}: {invite_link.invite_link}"
             )
         except Exception as e:
             logger.error(f"[invite_student_to_subject_groups] Could not send invite for {key} to {telegram_id}: {e}")
@@ -350,13 +350,13 @@ def _is_admin(user_id: Optional[int]) -> bool:
     return bool(user_id and user_id in ADMIN_IDS)
 
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"Your ID is: {update.effective_user.id}")
+    await update.message.reply_text(f"معرّفك هو: {update.effective_user.id}")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
-        "Available commands:\n"
-        "/subjects - View your subjects with invite links\n"
-        "/subscription - Check subscription status\n"
+        "الأوامر المتاحة:\n"
+        "/subjects - عرض موادك وروابط الدعوات\n"
+        "/subscription - التحقق من حالة الاشتراك\n"
     )
     await update.message.reply_text(help_text)
 
@@ -367,22 +367,22 @@ async def view_subjects(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     info = _get_student_subjects_and_niveau(student_id)
     if not info:
-        await update.message.reply_text("Could not retrieve your subjects. Please try again or contact support.")
+        await update.message.reply_text("تعذّر جلب موادك. يرجى المحاولة لاحقًا أو التواصل مع الدعم.")
         return
 
     # Subscription check first
     if not bool(info.get("subscription", False)):
-        await update.message.reply_text("You don't have a current subscription")
+        await update.message.reply_text("ليس لديك اشتراك نشط حاليًا.")
         return
 
     subjects: List[str] = info["subjects"]  # type: ignore
     niveau: str = str(info.get("niveau") or "").strip()
 
     if not subjects:
-        await update.message.reply_text("You currently have no subjects on file.")
+        await update.message.reply_text("لا توجد مواد مُسجّلة لك.")
         return
     if not niveau:
-        await update.message.reply_text("Your level (Niveau) is missing in the system. Please contact the admin.")
+        await update.message.reply_text("المستوى (Niveau) غير مسجّل لدينا. يرجى التواصل مع المشرف.")
         return
 
     subject_map = fetch_subject_channel_links()
@@ -401,11 +401,11 @@ async def view_subjects(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append(f"- {subj}: {invite_link_obj.invite_link}")
                 had_any_link = True
             except Exception as e:
-                lines.append(f"- {subj}: (couldn’t create invite link: {e})")
+                lines.append(f"- {subj}: (تعذّر إنشاء رابط الدعوة: {e})")
         else:
-            lines.append(f"- {subj}: (no channel yet)")
+            lines.append(f"- {subj}: (لا توجد قناة بعد)")
 
-    header = "Your subjects (click to join):" if had_any_link else "Your subjects:"
+    header = "موادك (اضغط للانضمام):" if had_any_link else "موادك:"
     await update.message.reply_text("\n".join([header] + lines))
 
 async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -435,33 +435,33 @@ async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE)
         reg_idx       = _header_index_alias(headers, ["Register_Date", "Register Date"], contains_all=["register","date"])
         end_idx       = _header_index_alias(headers, ["End_Date", "End Date"], contains_all=["end","date"])
 
-        subscription_info = f"Subscription Status for { _safe_cell(student_data, name_idx, '') }:\n"
-        subscription_info += f"Payment: { _safe_cell(student_data, pay_idx, '') }\n"
+        subscription_info = f"حالة الاشتراك للطالب { _safe_cell(student_data, name_idx, '') }:\n"
+        subscription_info += f"طريقة الدفع: { _safe_cell(student_data, pay_idx, '') }\n"
 
-        start_date = _safe_cell(student_data, reg_idx, "Not available")
-        end_date   = _safe_cell(student_data, end_idx, "Not available")
+        start_date = _safe_cell(student_data, reg_idx, "غير متوفر")
+        end_date   = _safe_cell(student_data, end_idx, "غير متوفر")
 
-        subscription_info += f"Start Date: {start_date}\n"
-        subscription_info += f"End Date: {end_date}\n"
+        subscription_info += f"تاريخ البداية: {start_date}\n"
+        subscription_info += f"تاريخ الانتهاء: {end_date}\n"
 
         try:
-            if start_date != "Not available" and end_date != "Not available":
+            if start_date != "غير متوفر" and end_date != "غير متوفر":
                 start = datetime.strptime(str(start_date), '%Y-%m-%d').date()
                 end = datetime.strptime(str(end_date), '%Y-%m-%d').date()
                 today = datetime.now().date()
                 if today < start:
-                    subscription_info += "Your subscription hasn't started yet\n"
+                    subscription_info += "لم يبدأ اشتراكك بعد\n"
                 elif today > end:
-                    subscription_info += "Your subscription has expired\n"
+                    subscription_info += "انتهى اشتراكك\n"
                 else:
                     days_left = (end - today).days
-                    subscription_info += f"Time remaining: {days_left} day(s)\n"
+                    subscription_info += f"المدة المتبقية: {days_left} يوم/أيام\n"
         except Exception:
-            subscription_info += "(Could not parse dates)\n"
+            subscription_info += "(تعذّر قراءة التواريخ)\n"
 
         await update.message.reply_text(subscription_info)
     else:
-        await update.message.reply_text("Could not retrieve your subscription status. Please try again or contact support.")
+        await update.message.reply_text("تعذّر جلب حالة اشتراكك. يرجى المحاولة لاحقًا أو التواصل مع الدعم.")
 
 # ===================== /set conversation (with conflict check) =====================
 
@@ -485,31 +485,31 @@ async def set_channel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.debug(f"[/set] start in chat_id={chat.id if chat else None}, by user_id={uid}")
 
     if chat.type not in ("group", "supergroup"):
-        await msg.reply_text("Please run /set inside the target group or supergroup.")
+        await msg.reply_text("يرجى تشغيل الأمر /set داخل المجموعة المستهدفة.")
         return ConversationHandler.END
 
     if not await _is_admin_for_set(update, context):
-        await msg.reply_text("Admins only. You must be a group admin or listed in ADMIN_IDS.")
+        await msg.reply_text("للمشرفين فقط. يجب أن تكون مشرفًا في المجموعة أو ضمن ADMIN_IDS.")
         return ConversationHandler.END
 
-    await msg.reply_text("Which Niveau do you want to set for this group? (e.g., 1AS, 2AS, 3AS)")
+    await msg.reply_text("ما هو المستوى الذي تريد ربطه بهذه المجموعة؟ (مثال: 1AS، 2AS، 3AS)")
     return SET_NIVEAU
 
 async def set_channel_get_niveau(update: Update, context: ContextTypes.DEFAULT_TYPE):
     niveau = str(update.message.text).strip().upper()
     if not niveau:
-        await update.message.reply_text("Please provide a valid Niveau, e.g., 3AS.")
+        await update.message.reply_text("يرجى إدخال مستوى صالح، مثل 3AS.")
         return SET_NIVEAU
 
     context.user_data['set_niveau'] = niveau
-    await update.message.reply_text(f"Great. Which Subject should map to this group for {niveau}? (e.g., Math, English)")
+    await update.message.reply_text(f"جيد. ما هي المادة التي تريد ربطها للمستوى {niveau}؟ (مثال: Math, English)")
     return SET_SUBJECT
 
 async def set_channel_get_subject(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     subject = str(update.message.text).strip()
     if not subject:
-        await update.message.reply_text("Please provide a valid subject, e.g., Math.")
+        await update.message.reply_text("يرجى إدخال مادة صالحة، مثل Math.")
         return SET_SUBJECT
 
     niveau = context.user_data.get('set_niveau', '')
@@ -555,12 +555,12 @@ async def set_channel_get_subject(update: Update, context: ContextTypes.DEFAULT_
                 'chat_id_to_store': chat_id_to_store,
             }
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("Set anyway", callback_data="set_confirm_yes"),
-                 InlineKeyboardButton("Cancel", callback_data="set_confirm_no")]
+                [InlineKeyboardButton("تعيين على أي حال", callback_data="set_confirm_yes"),
+                 InlineKeyboardButton("إلغاء", callback_data="set_confirm_no")]
             ])
             await update.message.reply_text(
-                f"⚠️ This group is already assigned to <b>{conflict_key}</b>.\n"
-                f"Do you want to set it anyway to <b>{key_canonical}</b>?",
+                f"⚠️ هذه المجموعة مرتبطة بالفعل بـ <b>{conflict_key}</b>.\n"
+                f"هل تريد ربطها على أي حال بـ <b>{key_canonical}</b>؟",
                 reply_markup=kb,
                 parse_mode="HTML"
             )
@@ -575,7 +575,7 @@ async def set_channel_get_subject(update: Update, context: ContextTypes.DEFAULT_
                 body={"values": [[key_canonical, chat_id_to_store]]},
             ).execute()
             await update.message.reply_text(
-                f"✅ Created and mapped <b>{key_canonical}</b> to this group.",
+                f"✅ تم إنشاء الربط وإسناد <b>{key_canonical}</b> لهذه المجموعة.",
                 parse_mode="HTML"
             )
         else:
@@ -586,13 +586,13 @@ async def set_channel_get_subject(update: Update, context: ContextTypes.DEFAULT_
                 body={"values": [[chat_id_to_store]]},
             ).execute()
             await update.message.reply_text(
-                f"✅ Updated mapping for <b>{key_canonical}</b> to this group.",
+                f"✅ تم تحديث الربط لـ <b>{key_canonical}</b> لهذه المجموعة.",
                 parse_mode="HTML"
             )
 
     except Exception as e:
         logger.exception("[/set] Exception while setting channel:")
-        await update.message.reply_text(f"❌ Failed to set channel id: {e}")
+        await update.message.reply_text(f"❌ فشل تعيين معرّف القناة: {e}")
 
     context.user_data.pop('set_niveau', None)
     return ConversationHandler.END
@@ -604,13 +604,13 @@ async def set_channel_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     pending = context.user_data.get('pending_set')
     if not pending:
-        await query.edit_message_text("No pending operation.")
+        await query.edit_message_text("لا توجد عملية قيد الانتظار.")
         return ConversationHandler.END
 
     if data == "set_confirm_no":
         context.user_data.pop('pending_set', None)
         context.user_data.pop('set_niveau', None)
-        await query.edit_message_text("Operation cancelled.")
+        await query.edit_message_text("تم إلغاء العملية.")
         return ConversationHandler.END
 
     try:
@@ -628,7 +628,7 @@ async def set_channel_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
                 body={"values": [[key_canonical, chat_id_to_store]]},
             ).execute()
             await query.edit_message_text(
-                f"✅ Created and mapped <b>{key_canonical}</b> to this group (despite existing assignment).",
+                f"✅ تم إنشاء الربط وإسناد <b>{key_canonical}</b> لهذه المجموعة (على الرغم من الارتباط السابق).",
                 parse_mode="HTML"
             )
         else:
@@ -639,13 +639,13 @@ async def set_channel_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
                 body={"values": [[chat_id_to_store]]},
             ).execute()
             await query.edit_message_text(
-                f"✅ Updated mapping for <b>{key_canonical}</b> to this group (despite existing assignment).",
+                f"✅ تم تحديث الربط لـ <b>{key_canonical}</b> لهذه المجموعة (على الرغم من الارتباط السابق).",
                 parse_mode="HTML"
             )
 
     except Exception as e:
         logger.exception("[/set_confirm] Exception while confirming set:")
-        await query.edit_message_text(f"❌ Failed to set channel id: {e}")
+        await query.edit_message_text(f"❌ فشل تعيين معرّف القناة: {e}")
 
     finally:
         context.user_data.pop('pending_set', None)
@@ -656,7 +656,7 @@ async def set_channel_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def set_channel_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('pending_set', None)
     context.user_data.pop('set_niveau', None)
-    await update.message.reply_text("Cancelled.")
+    await update.message.reply_text("تم الإلغاء.")
     return ConversationHandler.END
 
 # ===================== App factory (WEBHOOK-READY) =====================
@@ -696,6 +696,7 @@ def main(updater_none: bool = False):
     application.job_queue.run_daily(check_subscriptions_and_send_reminders, time(hour=9, minute=0))
 
     return application
+
 # --- Optional warm-up for Render cold starts ---------------------------------
 import asyncio
 
@@ -722,4 +723,3 @@ async def prewarm_clients():
 
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _sync)
-
