@@ -30,7 +30,8 @@ SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "")
 STUDENTS_SHEET = os.getenv("STUDENT_TABLE_NAME", "Students")
 SUBJECTS_CHANNELS_SHEET = os.getenv("SUBJECTS_CHANNEL_TABLE_NAME", "Subjects_Channels")
-STUDENTS_RANGE = f"{STUDENTS_SHEET}!A2:L"  # Phone..Name..Subjects..Speciality..Payment..ID..Register..End..Sub..10d..3d..Niveau
+# Phone, Name, Subjects, Speciality, Payment, ID, Register_Date, End_Date, Subscription, 10DaysReminder, 3DaysReminder, Niveau
+STUDENTS_RANGE = f"{STUDENTS_SHEET}!A2:L"
 
 STUDENT_BOT_TOKEN = os.getenv("STUDENT_BOT_TOKEN")  # used to DM Zoom links & invites
 
@@ -84,7 +85,8 @@ def _load_gcp_credentials() -> Credentials:
 
 def setup_sheets():
     creds = _load_gcp_credentials()
-    service = build("sheets", "v4", credentials=creds)
+    # cache_discovery=False -> faster cold start, no file cache
+    service = build("sheets", "v4", credentials=creds, cache_discovery=False)
     return service.spreadsheets(), service
 
 def get_sheet_id_by_title(service, title: str) -> int:
@@ -136,7 +138,7 @@ def _id_str_norm(value: object) -> str:
     except Exception:
         return str(value)
 
-def _safe_cell(row: List[object], idx: int, default: object=""):
+def _safe_cell(row: List[object], idx: int, default: object = ""):
     return row[idx] if idx != -1 and len(row) > idx else default
 
 def _chat_id(value: str | int) -> int | str:
@@ -280,9 +282,9 @@ async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "تم العثور على طالب:\n"
                 f"الهاتف: {data[0]}\nالاسم: {data[1]}\nالمواد: {data[2]}\n"
                 f"التخصص: {data[3]}\nالدفع: {data[4]}\n"
-                f"تاريخ التسجيل: {data[6] if len(data)>6 else 'غير متاح'}\n"
-                f"تاريخ الانتهاء: {data[7] if len(data)>7 else 'غير متاح'}\n"
-                f"الاشتراك: {data[8] if len(data)>8 else 'غير متاح'}",
+                f"تاريخ التسجيل: {data[6] if len(data) > 6 else 'غير متاح'}\n"
+                f"تاريخ الانتهاء: {data[7] if len(data) > 7 else 'غير متاح'}\n"
+                f"الاشتراك: {data[8] if len(data) > 8 else 'غير متاح'}",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
 
@@ -313,9 +315,9 @@ async def handle_telegram_id(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 "يوجد طالب بهذا معرّف تيليجرام:\n"
                 f"الهاتف: {data[0]}\nالاسم: {data[1]}\nالمواد: {data[2]}\n"
                 f"التخصص: {data[3]}\nالدفع: {data[4]}\n"
-                f"تاريخ التسجيل: {data[6] if len(data)>6 else 'غير متاح'}\n"
-                f"تاريخ الانتهاء: {data[7] if len(data)>7 else 'غير متاح'}\n"
-                f"الاشتراك: {data[8] if len(data)>8 else 'غير متاح'}",
+                f"تاريخ التسجيل: {data[6] if len(data) > 6 else 'غير متاح'}\n"
+                f"تاريخ الانتهاء: {data[7] if len(data) > 7 else 'غير متاح'}\n"
+                f"الاشتراك: {data[8] if len(data) > 8 else 'غير متاح'}",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
         return ConversationHandler.END
@@ -374,8 +376,10 @@ async def handle_subscription_period(update: Update, context: ContextTypes.DEFAU
         'niveau': context.user_data.get('niveau', '')
     }
 
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("نعم", callback_data="confirm_add_yes"),
-                                InlineKeyboardButton("لا", callback_data="confirm_add_no")]])
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("نعم", callback_data="confirm_add_yes"),
+         InlineKeyboardButton("لا", callback_data="confirm_add_no")]
+    ])
     await update.message.reply_text(
         f"هل أنت متأكد أنك تريد إضافة هذا الطالب بالمستوى: {context.user_data.get('niveau','')}",
         reply_markup=kb
@@ -560,6 +564,7 @@ def _find_zoom_recipients(niveau: str, subject: str) -> List[Dict[str, str]]:
         return []
 
     headers = rows[0]
+
     def idx_exact(name: str) -> int:
         try:
             return headers.index(name)
@@ -569,7 +574,7 @@ def _find_zoom_recipients(niveau: str, subject: str) -> List[Dict[str, str]]:
     id_idx       = _header_index_alias(headers, ["ID"], contains_any=["id"])
     name_idx     = _header_index_alias(headers, ["Student Name", "Name"], contains_any=["name"])
     subjects_idx = _header_index_alias(headers, ["Student Subjects", "Subjects"], contains_any=["subject"])
-    niveau_idx   = _header_index_alias(headers, ["Niveau", "Level"], contains_any=["niveau","level"])
+    niveau_idx   = _header_index_alias(headers, ["Niveau", "Level"], contains_any=["niveau", "level"])
     subs_idx     = idx_exact("Subscription")
 
     if min(id_idx, subjects_idx, niveau_idx, subs_idx) == -1:
@@ -611,7 +616,7 @@ async def zoom_get_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     z['url'] = url
     context.user_data['zoom'] = z
 
-    recipients = _find_zoom_recipients(z.get("niveau",""), z.get("subject",""))
+    recipients = _find_zoom_recipients(z.get("niveau", ""), z.get("subject", ""))
     z['recipients'] = recipients
     context.user_data['zoom'] = z
 
@@ -712,7 +717,7 @@ async def main(student_app=None, updater_none: bool = False):
             ZOOM_SUBJECT: [MessageHandler(ADMIN_FILTER & filters.TEXT & ~filters.COMMAND, zoom_get_subject)],
             ZOOM_URL:     [MessageHandler(ADMIN_FILTER & filters.TEXT & ~filters.COMMAND, zoom_get_url)],
             ZOOM_CONFIRM: [CallbackQueryHandler(zoom_confirm, pattern=r'^zoom_send_(yes|no)$')],
-        ],
+        },
         fallbacks=[CommandHandler('cancel', cancel, filters=ADMIN_FILTER)],
         allow_reentry=True,
     )
@@ -740,10 +745,7 @@ async def prewarm_clients():
     def _sync():
         try:
             creds = _load_gcp_credentials()
-            # cache_discovery=False avoids extra disk I/O & warnings
             service = build('sheets', 'v4', credentials=creds, cache_discovery=False)
-
-            # Tiny, fast reads just to establish TLS, mint tokens, etc.
             service.spreadsheets().values().get(
                 spreadsheetId=SPREADSHEET_ID,
                 range=f"{STUDENTS_SHEET}!A1:A1"
