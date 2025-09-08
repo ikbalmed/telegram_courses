@@ -1,4 +1,3 @@
-
 # admin_bot.py
 import os
 import re
@@ -50,9 +49,9 @@ ADMIN_FILTER = filters.User(user_id=list(ADMIN_IDS)) if ADMIN_IDS else filters.U
 async def _deny(update: Update):
     try:
         if update.callback_query:
-            await update.callback_query.answer("Admins only.", show_alert=True)
+            await update.callback_query.answer("المشرفون فقط.", show_alert=True)
         elif update.effective_message:
-            await update.effective_message.reply_text("Admins only.")
+            await update.effective_message.reply_text("المشرفون فقط.")
     except Exception:
         pass
 
@@ -240,29 +239,29 @@ async def start_add_student(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args and len(context.args) >= 1:
         niveau = context.args[0].strip().upper()
     if not niveau:
-        await update.message.reply_text("Usage: /add_student <Niveau>\nExample: /add_student 1AS")
+        await update.message.reply_text("الاستخدام: /add_student <المستوى>\nمثال: /add_student 1AS")
         return ConversationHandler.END
 
     context.user_data.clear()
     context.user_data['niveau'] = niveau
     context.user_data['new_flow'] = True
     context.user_data['adding_same_phone'] = False
-    await update.message.reply_text("Please write the student name:")
+    await update.message.reply_text("يرجى إدخال اسم الطالب:")
     return NAME
 
 @admin_only
 async def handle_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['name'] = update.message.text.strip()
     if context.user_data.get('adding_same_phone'):
-        await update.message.reply_text("Please enter the student's Telegram ID:")
+        await update.message.reply_text("يرجى إدخال معرّف تيليجرام للطالب:")
         return TELEGRAM_ID
-    await update.message.reply_text("Please enter the student's phone number:")
+    await update.message.reply_text("يرجى إدخال رقم هاتف الطالب:")
     return PHONE
 
 @admin_only
 async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('adding_same_phone'):
-        await update.message.reply_text("Please enter the student's Telegram ID:")
+        await update.message.reply_text("يرجى إدخال معرّف تيليجرام للطالب:")
         return TELEGRAM_ID
 
     phone = update.message.text.strip()
@@ -274,24 +273,24 @@ async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
             row_number = student_info['row_number']
             data = student_info['data']
             keyboard = [
-                [InlineKeyboardButton("Edit Student", callback_data=f"{EDIT_STUDENT}_student_{row_number}")],
-                [InlineKeyboardButton("Delete Student", callback_data=f"{DELETE_STUDENT}_student_{row_number}")]
+                [InlineKeyboardButton("تعديل الطالب", callback_data=f"{EDIT_STUDENT}_student_{row_number}")],
+                [InlineKeyboardButton("حذف الطالب", callback_data=f"{DELETE_STUDENT}_student_{row_number}")]
             ]
             await update.message.reply_text(
-                "Student found:\n"
-                f"Phone: {data[0]}\nName: {data[1]}\nSubjects: {data[2]}\n"
-                f"Speciality: {data[3]}\nPayment: {data[4]}\n"
-                f"Register Date: {data[6] if len(data)>6 else 'N/A'}\n"
-                f"End Date: {data[7] if len(data)>7 else 'N/A'}\n"
-                f"Subscription: {data[8] if len(data)>8 else 'N/A'}",
+                "تم العثور على طالب:\n"
+                f"الهاتف: {data[0]}\nالاسم: {data[1]}\nالمواد: {data[2]}\n"
+                f"التخصص: {data[3]}\nالدفع: {data[4]}\n"
+                f"تاريخ التسجيل: {data[6] if len(data)>6 else 'غير متاح'}\n"
+                f"تاريخ الانتهاء: {data[7] if len(data)>7 else 'غير متاح'}\n"
+                f"الاشتراك: {data[8] if len(data)>8 else 'غير متاح'}",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
 
-        add_new_keyboard = [[InlineKeyboardButton("Add New Student with same number", callback_data=ADD_NEW_STUDENT_SAME_NUMBER)]]
-        await update.message.reply_text("Options:", reply_markup=InlineKeyboardMarkup(add_new_keyboard))
+        add_new_keyboard = [[InlineKeyboardButton("إضافة طالب جديد بنفس الرقم", callback_data=ADD_NEW_STUDENT_SAME_NUMBER)]]
+        await update.message.reply_text("الخيارات:", reply_markup=InlineKeyboardMarkup(add_new_keyboard))
         return ConversationHandler.END
 
-    await update.message.reply_text("Please enter the student's Telegram ID:")
+    await update.message.reply_text("يرجى إدخال معرّف تيليجرام للطالب:")
     return TELEGRAM_ID
 
 @admin_only
@@ -307,39 +306,39 @@ async def handle_telegram_id(update: Update, context: ContextTypes.DEFAULT_TYPE)
             row_number = student_info['row_number']
             data = student_info['data']
             keyboard = [
-                [InlineKeyboardButton("Edit Student", callback_data=f"{EDIT_STUDENT}_student_{row_number}")],
-                [InlineKeyboardButton("Delete Student", callback_data=f"{DELETE_STUDENT}_student_{row_number}")]
+                [InlineKeyboardButton("تعديل الطالب", callback_data=f"{EDIT_STUDENT}_student_{row_number}")],
+                [InlineKeyboardButton("حذف الطالب", callback_data=f"{DELETE_STUDENT}_student_{row_number}")]
             ]
             await update.message.reply_text(
-                "A student with this Telegram ID already exists:\n"
-                f"Phone: {data[0]}\nName: {data[1]}\nSubjects: {data[2]}\n"
-                f"Speciality: {data[3]}\nPayment: {data[4]}\n"
-                f"Register Date: {data[6] if len(data)>6 else 'N/A'}\n"
-                f"End Date: {data[7] if len(data)>7 else 'N/A'}\n"
-                f"Subscription: {data[8] if len(data)>8 else 'N/A'}",
+                "يوجد طالب بهذا معرّف تيليجرام:\n"
+                f"الهاتف: {data[0]}\nالاسم: {data[1]}\nالمواد: {data[2]}\n"
+                f"التخصص: {data[3]}\nالدفع: {data[4]}\n"
+                f"تاريخ التسجيل: {data[6] if len(data)>6 else 'غير متاح'}\n"
+                f"تاريخ الانتهاء: {data[7] if len(data)>7 else 'غير متاح'}\n"
+                f"الاشتراك: {data[8] if len(data)>8 else 'غير متاح'}",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
         return ConversationHandler.END
 
-    await update.message.reply_text("Please enter the student's subjects (comma separated):")
+    await update.message.reply_text("يرجى إدخال مواد الطالب (مفصولة بفواصل):")
     return SUBJECTS
 
 @admin_only
 async def handle_subjects(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['subjects'] = update.message.text.strip()
-    await update.message.reply_text("Please enter the speciality:")
+    await update.message.reply_text("يرجى إدخال التخصص:")
     return SPECIALITY
 
 @admin_only
 async def handle_speciality(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['speciality'] = update.message.text.strip()
-    await update.message.reply_text("Please enter the payment method:")
+    await update.message.reply_text("يرجى إدخال طريقة الدفع:")
     return PAYMENT
 
 @admin_only
 async def handle_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['payment'] = update.message.text.strip()
-    await update.message.reply_text("Please enter the subscription period in months (e.g., 1, 3, 6, 12) or a specific end date (DD/MM/YYYY):")
+    await update.message.reply_text("يرجى إدخال مدة الاشتراك بالأشهر (مثال: 1، 3، 6، 12) أو تاريخ انتهاء محدد (DD/MM/YYYY):")
     return SUBSCRIPTION_PERIOD
 
 @admin_only
@@ -357,7 +356,7 @@ async def handle_subscription_period(update: Update, context: ContextTypes.DEFAU
             input_date = datetime.strptime(txt, '%d/%m/%Y').date()
             end_date = input_date.strftime('%Y-%m-%d')
         except ValueError:
-            await update.message.reply_text("Invalid period. Enter integer months or a date in DD/MM/YYYY.")
+            await update.message.reply_text("مدة غير صالحة. أدخل عدد الأشهر كعدد صحيح أو تاريخ بصيغة DD/MM/YYYY.")
             return SUBSCRIPTION_PERIOD
 
     context.user_data['pending_student'] = {
@@ -375,10 +374,10 @@ async def handle_subscription_period(update: Update, context: ContextTypes.DEFAU
         'niveau': context.user_data.get('niveau', '')
     }
 
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Yes", callback_data="confirm_add_yes"),
-                                InlineKeyboardButton("No", callback_data="confirm_add_no")]])
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("نعم", callback_data="confirm_add_yes"),
+                                InlineKeyboardButton("لا", callback_data="confirm_add_no")]])
     await update.message.reply_text(
-        f"Are you sure you want to add this student with this niveau: {context.user_data.get('niveau','')}",
+        f"هل أنت متأكد أنك تريد إضافة هذا الطالب بالمستوى: {context.user_data.get('niveau','')}",
         reply_markup=kb
     )
     return CONFIRM_ADD
@@ -389,12 +388,12 @@ async def confirm_add_student(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
     if query.data == "confirm_add_no":
         context.user_data.pop('pending_student', None)
-        await query.edit_message_text("Operation cancelled.")
+        await query.edit_message_text("تم إلغاء العملية.")
         return ConversationHandler.END
 
     pending = context.user_data.get('pending_student')
     if not pending:
-        await query.edit_message_text("No pending student to add.")
+        await query.edit_message_text("لا توجد عملية إضافة معلّقة.")
         return ConversationHandler.END
 
     # Ensure Subjects_Channels keys exist for this niveau+subjects
@@ -416,11 +415,11 @@ async def confirm_add_student(update: Update, context: ContextTypes.DEFAULT_TYPE
         try:
             await invite_student_to_subject_groups(student_bot, pending['telegram_id'], keys)
         except Exception as e:
-            await query.message.reply_text(f"Student added, but invite sending failed: {e}")
+            await query.message.reply_text(f"تمت إضافة الطالب، لكن فشل إرسال الدعوات: {e}")
 
     context.user_data.pop('pending_student', None)
     context.user_data['adding_same_phone'] = False
-    await query.edit_message_text("Student added successfully!")
+    await query.edit_message_text("تمت إضافة الطالب بنجاح!")
     return ConversationHandler.END
 
 # ========================= Edit/Delete callbacks =========================
@@ -436,16 +435,16 @@ async def start_edit_student(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if row_number:
         context.user_data['edit_row_number'] = row_number
         keyboard = [
-            [InlineKeyboardButton("Phone", callback_data='edit_column_phone')],
-            [InlineKeyboardButton("Name", callback_data='edit_column_name')],
-            [InlineKeyboardButton("Subjects", callback_data='edit_column_subjects')],
-            [InlineKeyboardButton("Speciality", callback_data='edit_column_speciality')],
-            [InlineKeyboardButton("Payment", callback_data='edit_column_payment')]
+            [InlineKeyboardButton("الهاتف", callback_data='edit_column_phone')],
+            [InlineKeyboardButton("الاسم", callback_data='edit_column_name')],
+            [InlineKeyboardButton("المواد", callback_data='edit_column_subjects')],
+            [InlineKeyboardButton("التخصص", callback_data='edit_column_speciality')],
+            [InlineKeyboardButton("الدفع", callback_data='edit_column_payment')]
         ]
-        await query.edit_message_text("Which column do you want to edit?", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("أي عمود تريد تعديله؟", reply_markup=InlineKeyboardMarkup(keyboard))
         return EDIT_COLUMN
     else:
-        await query.edit_message_text("Could not edit student: row number not found.")
+        await query.edit_message_text("تعذّر تعديل الطالب: لم يتم العثور على رقم الصف.")
         return ConversationHandler.END
 
 @admin_only
@@ -461,9 +460,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         row_number_str = query.data.replace(DELETE_STUDENT + '_student_', '', 1)
         if row_number_str.isdigit():
             delete_student(int(row_number_str))
-            await query.edit_message_text("Student deleted successfully!")
+            await query.edit_message_text("تم حذف الطالب بنجاح!")
         else:
-            await query.edit_message_text("Could not delete student: row number not found.")
+            await query.edit_message_text("تعذّر حذف الطالب: رقم الصف غير موجود.")
 
     if query.data == ADD_NEW_STUDENT_SAME_NUMBER:
         await start_add_new_student_same_number(update, context)
@@ -477,11 +476,11 @@ async def start_add_new_student_same_number(update: Update, context: ContextType
     if phone:
         context.user_data['adding_same_phone'] = True
         await query.edit_message_text(
-            f"Adding new student with phone number: {phone}.\nPlease enter the student's name:"
+            f"إضافة طالب جديد بنفس الرقم: {phone}.\nيرجى إدخال اسم الطالب:"
         )
         return NAME
     else:
-        await query.edit_message_text("Could not retrieve phone number. Please start again with /add_student.")
+        await query.edit_message_text("تعذّر استرجاع رقم الهاتف. يرجى البدء من جديد باستخدام /add_student.")
         return ConversationHandler.END
 
 @admin_only
@@ -492,10 +491,10 @@ async def handle_edit_column(update: Update, context: ContextTypes.DEFAULT_TYPE)
     valid_columns = {"phone": 0, "name": 1, "subjects": 2, "speciality": 3, "payment": 4}
     if column_name in valid_columns:
         context.user_data['edit_column_index'] = valid_columns[column_name]
-        await query.edit_message_text(f"Please enter the new value for {column_name}:")
+        await query.edit_message_text("يرجى إدخال القيمة الجديدة:")
         return EDIT_VALUE
     else:
-        await query.edit_message_text("Invalid column name. Please choose from Phone, Name, Subjects, Speciality, Payment.")
+        await query.edit_message_text("اسم عمود غير صالح. الرجاء الاختيار من: Phone, Name, Subjects, Speciality, Payment.")
         return EDIT_COLUMN
 
 @admin_only
@@ -505,7 +504,7 @@ async def handle_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     column_index = context.user_data.get('edit_column_index')
 
     if row_number is None or column_index is None:
-        await update.message.reply_text("Error: Could not retrieve editing information.")
+        await update.message.reply_text("خطأ: تعذّر استرجاع معلومات التعديل.")
         return ConversationHandler.END
 
     sheets, _ = setup_sheets()
@@ -517,7 +516,7 @@ async def handle_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
         body={'values': [[new_value]]}
     ).execute()
 
-    await update.message.reply_text("Student information updated successfully!")
+    await update.message.reply_text("تم تحديث بيانات الطالب بنجاح!")
     context.user_data.pop('edit_row_number', None)
     context.user_data.pop('edit_column_index', None)
     return ConversationHandler.END
@@ -526,27 +525,27 @@ async def handle_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def zoom_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('zoom', None)
-    await update.message.reply_text("For which Niveau do you want to send a Zoom link? (e.g., 1AS, 2AS, 3AS)")
+    await update.message.reply_text("لأي مستوى تريد إرسال رابط Zoom؟ (مثل 1AS، 2AS، 3AS)")
     return ZOOM_NIVEAU
 
 @admin_only
 async def zoom_get_niveau(update: Update, context: ContextTypes.DEFAULT_TYPE):
     niveau = update.message.text.strip().upper()
     if not niveau:
-        await update.message.reply_text("Please provide a valid Niveau, e.g., 3AS.")
+        await update.message.reply_text("يرجى إدخال مستوى صالح، مثل 3AS.")
         return ZOOM_NIVEAU
     context.user_data['zoom'] = {'niveau': niveau}
-    await update.message.reply_text(f"Which Subject for {niveau}? (e.g., Math, Physic, English)")
+    await update.message.reply_text(f"ما هي المادة للمستوى {niveau}؟ (مثل: Math, Physic, English)")
     return ZOOM_SUBJECT
 
 @admin_only
 async def zoom_get_subject(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subject = update.message.text.strip()
     if not subject:
-        await update.message.reply_text("Please provide a valid subject, e.g., Math.")
+        await update.message.reply_text("يرجى إدخال مادة صالحة، مثل Math.")
         return ZOOM_SUBJECT
     context.user_data['zoom']['subject'] = subject
-    await update.message.reply_text("Please paste the Zoom meeting URL:")
+    await update.message.reply_text("يرجى لصق رابط اجتماع Zoom:")
     return ZOOM_URL
 
 def _find_zoom_recipients(niveau: str, subject: str) -> List[Dict[str, str]]:
@@ -605,7 +604,7 @@ def _find_zoom_recipients(niveau: str, subject: str) -> List[Dict[str, str]]:
 async def zoom_get_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
     if not re.match(r"^https?://", url, re.I):
-        await update.message.reply_text("That doesn’t look like a valid URL. Please paste a link starting with http(s)://")
+        await update.message.reply_text("يبدو أن الرابط غير صالح. يرجى لصق رابط يبدأ بـ http(s)://")
         return ZOOM_URL
 
     z = context.user_data.get('zoom', {})
@@ -619,13 +618,13 @@ async def zoom_get_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     count = len(recipients)
     sample = ", ".join([f"{r['name']} ({r['id']})" for r in recipients[:5]]) or "—"
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Yes", callback_data="zoom_send_yes"),
-         InlineKeyboardButton("Cancel", callback_data="zoom_send_no")]
+        [InlineKeyboardButton("نعم", callback_data="zoom_send_yes"),
+         InlineKeyboardButton("إلغاء", callback_data="zoom_send_no")]
     ])
     await update.message.reply_text(
-        f"Send Zoom link to {count} student(s)?\n"
-        f"Niveau: {z.get('niveau')}, Subject: {z.get('subject')}\n"
-        f"Preview: {sample}\n\n{url}",
+        f"هل تريد إرسال رابط Zoom إلى {count} طالب/طلاب؟\n"
+        f"المستوى: {z.get('niveau')}, المادة: {z.get('subject')}\n"
+        f"معاينة: {sample}\n\n{url}",
         reply_markup=kb
     )
     return ZOOM_CONFIRM
@@ -637,11 +636,11 @@ async def zoom_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "zoom_send_no":
         context.user_data.pop('zoom', None)
-        await query.edit_message_text("Operation cancelled.")
+        await query.edit_message_text("تم إلغاء العملية.")
         return ConversationHandler.END
 
     if not STUDENT_BOT_TOKEN:
-        await query.edit_message_text("STUDENT_BOT_TOKEN is not set; cannot send DMs.")
+        await query.edit_message_text("لم يتم ضبط STUDENT_BOT_TOKEN؛ لا يمكن الإرسال عبر الرسائل الخاصة.")
         context.user_data.pop('zoom', None)
         return ConversationHandler.END
 
@@ -652,7 +651,7 @@ async def zoom_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subject = z.get('subject', '')
 
     if not recipients:
-        await query.edit_message_text("No matching students (check Niveau, Subject, or Subscription status).")
+        await query.edit_message_text("لا يوجد طلاب مطابقون (تحقق من المستوى، المادة، أو حالة الاشتراك).")
         context.user_data.pop('zoom', None)
         return ConversationHandler.END
 
@@ -664,7 +663,7 @@ async def zoom_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await student_bot.send_message(
                 chat_id=chat_id,
-                text=f"📌 Zoom class for <b>{niveau} – {subject}</b>\n{url}",
+                text=f"📌 حصة Zoom لـ <b>{niveau} – {subject}</b>\n{url}",
                 parse_mode="HTML",
                 disable_web_page_preview=False
             )
@@ -672,14 +671,14 @@ async def zoom_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             fail += 1
 
-    await query.edit_message_text(f"Done. Zoom link sent to {ok} student(s). Failed: {fail}.")
+    await query.edit_message_text(f"تم. أُرسل الرابط إلى {ok} طالب/طلاب. فشل الإرسال: {fail}.")
     context.user_data.pop('zoom', None)
     return ConversationHandler.END
 
 # ========================= Cancel =========================
 @admin_only
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("Operation cancelled.")
+    await update.message.reply_text("تم إلغاء العملية.")
     return ConversationHandler.END
 
 # ========================= Application factory (WEBHOOK-READY) =========================
@@ -713,7 +712,7 @@ async def main(student_app=None, updater_none: bool = False):
             ZOOM_SUBJECT: [MessageHandler(ADMIN_FILTER & filters.TEXT & ~filters.COMMAND, zoom_get_subject)],
             ZOOM_URL:     [MessageHandler(ADMIN_FILTER & filters.TEXT & ~filters.COMMAND, zoom_get_url)],
             ZOOM_CONFIRM: [CallbackQueryHandler(zoom_confirm, pattern=r'^zoom_send_(yes|no)$')],
-        },
+        ],
         fallbacks=[CommandHandler('cancel', cancel, filters=ADMIN_FILTER)],
         allow_reentry=True,
     )
@@ -728,7 +727,9 @@ async def main(student_app=None, updater_none: bool = False):
         )
 
     print(f"Admin bot started with {len(ADMIN_IDS)} admin(s).")
-    return application # --- Optional warm-up for Render cold starts (admin_bot) ----------------------
+    return application
+
+# --- Optional warm-up for Render cold starts (admin_bot) ----------------------
 import asyncio
 
 async def prewarm_clients():
