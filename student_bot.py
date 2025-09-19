@@ -4,7 +4,8 @@ import re
 import json
 import base64
 import logging
-from typing import List, Set, Dict, Optional, Union
+import difflib
+from typing import List, Set, Dict, Optional, Union, Tuple
 from datetime import datetime, timedelta, date, time
 
 from dotenv import load_dotenv
@@ -57,6 +58,14 @@ if ADMIN_IDS:
 
 # Conversation states for /set flow
 SET_NIVEAU, SET_SUBJECT, SET_CONFIRM = range(3)
+
+# Conversation states for /register flow
+(
+    REG_NAME, REG_PHONE, REG_NIVEAU, REG_SUBJECTS,
+    REG_SPECIALITY, REG_PAYMENT, REG_PERIOD, REG_CONFIRM
+) = range(3, 11)
+
+ALLOWED_NIVEAUX = {"3AS", "2AS", "1AS", "4AM", "3AM", "2AM", "1AM"}
 
 # ===================== Google Sheets helpers =====================
 
@@ -212,6 +221,84 @@ def _key_for(niveau: str, subject: str) -> str:
     normalized_subject = re.sub(r'\s+', '_', subject.strip())
     return f"{niveau}_{normalized_subject}"
 
+# ---------- Subjects_Channels ensure ----------
+def ensure_subject_channels_rows(niveau: str, subjects: List[str]):
+    if not subjects:
+        return
+    sheets = setup_sheets()
+    existing = sheets.values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f'{SUBJECTS_CHANNEL_TABLE_NAME}!A2:A'
+    ).execute().get('values', []) or []
+    existing_keys = set(v[0] for v in existing if v)
+    to_append = []
+    for subj in subjects:
+        normalized = re.sub(r'\s+', '_', subj)
+        key = f"{niveau}_{normalized}"
+        if key not in existing_keys:
+            to_append.append([key, ""])
+    if to_append:
+        sheets.values().append(
+            spreadsheetId=SPREADSHEET_ID,
+            range=f'{SUBJECTS_CHANNEL_TABLE_NAME}!A:B',
+            valueInputOption='RAW',
+            insertDataOption='INSERT_ROWS',
+            body={'values': to_append}
+        ).execute()
+
+# ---------- Registration helpers: subject canonicalization ----------
+SUBJECT_SYNONYMS: Dict[str, List[str]] = {
+    "Math":    ["math", "maths", "mathematiques", "mathematique", "mat", "رياضيات"],
+    "Physic":  ["physic", "physics", "physique", "phy", "فيزياء"],
+    "English": ["english", "anglais", "englich", "inglish", "ang", "انجليزي", "انجليزية"],
+    "Arab":    ["arab", "arabic", "arabe", "عربي", "العربية"],
+    "French":  ["french", "francais", "français", "فرنسية"],
+    "Science": ["science", "sciences", "sci", "علوم"],
+    "History": ["history", "histoire", "تاريخ"],
+    "Geography": ["geography", "geographie", "geo", "جغرافيا"],
+}
+
+def _available_subjects_for_niveau(niveau: str) -> List[str]:
+    """Pull distinct subjects that already exist in Subjects_Channels for this niveau."""
+    mapping = fetch_subject_channel_links()
+    lvl = niveau.strip().lower() + "_"
+    found = []
+    for key in mapping.keys():
+        if key.startswith(lvl):
+            subj = key.split("_", 1)[1]
+            found.append(subj)
+    # Capitalize in a readable way
+    unique = sorted({s.replace("_", " ") for s in found})
+    # Convert to canonical style (remove spaces after we pick)
+    return [s.replace(" ", "_") for s in unique]
+
+def _canonicalize_subject_for_niveau(niveau: str, raw_subj: str) -> Tuple[str, Optional[str]]:
+    """
+    Returns (canonical_subject, reason) where reason is None if direct,
+    or a short note like 'synonym'/'fuzzy' indicating adjustment.
+    """
+    txt = raw_subj.strip().lower().replace("’", "'")
+    txt_compact = re.sub(r'\s+', '', txt)
+
+    # 1) Try synonyms dictionary
+    for canon, variants in SUBJECT_SYNONYMS.items():
+        for v in variants:
+            if txt == v or txt_compact == v.replace(" ", ""):
+                return canon, "synonym"
+
+    # 2) Try fuzzy over subjects that exist for this niveau
+    existing = _available_subjects_for_niveau(niveau)
+    if existing:
+        # Build map lower->original
+        lower_map = {e.lower(): e for e in existing}
+        matches = difflib.get_close_matches(txt.replace(" ", "_"), list(lower_map.keys()), n=1, cutoff=0.6)
+        if matches:
+            m = matches[0]
+            return lower_map[m].replace("_", " ").title().replace(" ", ""), "fuzzy"
+
+    # 3) Fallback: Title-case the input (best effort)
+    return raw_subj.strip().title().replace(" ", ""), None
+
 # ===================== Reminders job (10d + 3d) =====================
 
 async def check_subscriptions_and_send_reminders(context: ContextTypes.DEFAULT_TYPE):
@@ -266,7 +353,6 @@ async def check_subscriptions_and_send_reminders(context: ContextTypes.DEFAULT_T
 
         if today > end_dt:
             if sub_status == "TRUE":
-                # Flip subscription to FALSE and notify
                 try:
                     col = _col_letter(subscription_idx)
                     sheets.values().update(
@@ -353,10 +439,6 @@ async def _broadcast_invites_to_existing_students(
     group_chat_id: Union[int, str],
     bot: Bot
 ) -> tuple[int, int]:
-    """
-    Finds subscribed students with the given niveau & subject; sends them an invite
-    link to the provided group. Returns (sent_count, failed_count). Silent (no chat message).
-    """
     try:
         sheets = setup_sheets()
         res = sheets.values().get(
@@ -381,7 +463,6 @@ async def _broadcast_invites_to_existing_students(
         want_subject = subject_canonical.strip().lower()
 
         sent = failed = 0
-        # create invite once to reduce API calls
         try:
             link_obj = await bot.create_chat_invite_link(chat_id=_chat_id(group_chat_id), creates_join_request=True)
             invite_url = link_obj.invite_link
@@ -412,7 +493,7 @@ async def _broadcast_invites_to_existing_students(
                 failed += 1
 
         logger.info("Broadcast invites after /set for %s_%s: sent=%d failed=%d", niveau, subject_canonical, sent, failed)
-        return (sent, failed)
+        return (0, 0)
     except Exception as e:
         logger.debug("Broadcast failed: %s", e)
         return (0, 0)
@@ -428,8 +509,10 @@ async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "الأوامر المتاحة:\n"
+        "/register - تسجيل حسابك كطالب\n"
         "/subjects - عرض موادك مع روابط الدعوة\n"
         "/subscription - حالة الاشتراك\n"
+        "/set - (للمشرفين) ربط مجموعة بمادة/مستوى\n"
     )
     await update.message.reply_text(help_text)
 
@@ -443,7 +526,6 @@ async def view_subjects(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("تعذّر جلب موادك. أعد المحاولة أو تواصل مع المشرف.")
         return
 
-    # Subscription check first
     if not bool(info.get("subscription", False)):
         await update.message.reply_text("ليس لديك اشتراك فعّال حاليًا.")
         return
@@ -474,7 +556,7 @@ async def view_subjects(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append(f"- {subj}: {invite_link_obj.invite_link}")
                 had_any_link = True
             except Exception as e:
-                lines.append(f"- {subj}: (تعذّر إنشاء رابط الدعوة: {e})")
+                lines.append(f"- {subj}: (تعذّر إنشاء رابط الدعوة)")
         else:
             lines.append(f"- {subj}: (لا توجد مجموعة حالياً)")
 
@@ -560,7 +642,6 @@ async def set_channel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("المشرفون فقط.")
         return ConversationHandler.END
 
-    # Inline buttons ensure bot receives the callback even with privacy mode ON
     nivs = ["1AS", "2AS", "3AS", "4AM", "3AM", "2AM", "1AM"]
     rows = [
         [InlineKeyboardButton(n, callback_data=f"setniv:{n}") for n in nivs[:3]],
@@ -589,7 +670,6 @@ async def set_channel_get_niveau(update: Update, context: ContextTypes.DEFAULT_T
         return SET_NIVEAU
 
     context.user_data['set_niveau'] = niveau
-    # ForceReply so the bot gets the next message even with privacy mode ON
     await (update.effective_message or update.callback_query.message).reply_text(
         f"جيّد. ما هي المادة للمستوى {niveau}؟ (مثل: Math, English)",
         reply_markup=ForceReply(selective=True)
@@ -681,7 +761,6 @@ async def set_channel_get_subject(update: Update, context: ContextTypes.DEFAULT_
                 parse_mode="HTML"
             )
 
-        # Silently notify existing subscribed students (no message in the group)
         try:
             await _broadcast_invites_to_existing_students(
                 niveau=niveau,
@@ -745,7 +824,6 @@ async def set_channel_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
                 parse_mode="HTML"
             )
 
-        # Silently notify existing subscribed students (no group message)
         try:
             niveau = key_canonical.split("_", 1)[0]
             subj_canon = key_canonical.split("_", 1)[1]
@@ -773,6 +851,218 @@ async def set_channel_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text("تم الإلغاء.")
     return ConversationHandler.END
 
+# ===================== /register conversation =====================
+
+def _student_exists_by_id(telegram_id: str) -> bool:
+    return _get_student_subjects_and_niveau(telegram_id) is not None
+
+def _append_student_row(
+    phone: str, name: str, subjects_csv: str, speciality: str, payment: str,
+    telegram_id: str, register_date: str, end_date: str, niveau: str
+):
+    sheets = setup_sheets()
+    row = [
+        phone, name, subjects_csv, speciality, payment, telegram_id,
+        register_date, end_date, "TRUE", "FALSE", "FALSE", niveau
+    ]
+    sheets.values().append(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"{STUDENT_TABLE_NAME}!A2:L",
+        valueInputOption='RAW',
+        insertDataOption='INSERT_ROWS',
+        body={'values': [row]}
+    ).execute()
+
+async def register_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    if _student_exists_by_id(uid):
+        await update.message.reply_text("أنت مسجّل مسبقًا. استخدم /subjects لعرض روابط المجموعات.")
+        return ConversationHandler.END
+
+    context.user_data['reg'] = {}
+    await update.message.reply_text("مرحبًا! لنبدأ التسجيل.\nما اسمك الكامل؟")
+    return REG_NAME
+
+async def reg_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['reg']['name'] = (update.message.text or "").strip()
+    await update.message.reply_text("رقم الهاتف:")
+    return REG_PHONE
+
+async def reg_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['reg']['phone'] = (update.message.text or "").strip()
+    rows = [
+        [InlineKeyboardButton(n, callback_data=f"niv:{n}") for n in ["1AS", "2AS", "3AS"]],
+        [InlineKeyboardButton(n, callback_data=f"niv:{n}") for n in ["4AM", "3AM", "2AM"]],
+        [InlineKeyboardButton("1AM", callback_data="niv:1AM")]
+    ]
+    await update.message.reply_text(
+        "ما هو مستواك الدراسي (Niveau)؟ اختر من الأزرار أو أرسل النص (3AS, 2AS, 1AS, 4AM, 3AM, 2AM, 1AM):",
+        reply_markup=InlineKeyboardMarkup(rows)
+    )
+    return REG_NIVEAU
+
+async def reg_niveau(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        await update.callback_query.answer()
+        niv = update.callback_query.data.split(":", 1)[1]
+        await update.callback_query.edit_message_text(f"المستوى: {niv}")
+    else:
+        niv = (update.message.text or "").strip().upper()
+
+    if niv not in ALLOWED_NIVEAUX:
+        await (update.effective_message or update.callback_query.message).reply_text(
+            "⚠️ مستوى غير صحيح. المستويات المسموحة: 3AS, 2AS, 1AS, 4AM, 3AM, 2AM, 1AM."
+        )
+        return REG_NIVEAU
+
+    context.user_data['reg']['niveau'] = niv
+    await (update.effective_message or update.callback_query.message).reply_text(
+        "اكتب موادك مفصولة بفواصل، مثال: Math, English"
+    )
+    return REG_SUBJECTS
+
+async def reg_subjects(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw = (update.message.text or "").strip()
+    typed = [s.strip() for s in raw.split(",") if s.strip()]
+    niveau = context.user_data['reg'].get('niveau', '')
+
+    canonical: List[str] = []
+    notes = []
+    for s in typed:
+        canon, reason = _canonicalize_subject_for_niveau(niveau, s)
+        if canon not in canonical:
+            canonical.append(canon)
+        if reason:
+            notes.append(f"{s} → {canon} ({'مرادف' if reason=='synonym' else 'تقريب'})")
+
+    context.user_data['reg']['subjects'] = canonical
+    # Ensure rows exist in Subjects_Channels
+    ensure_subject_channels_rows(niveau, canonical)
+
+    msg = "تم تسجيل المواد المبدئية: " + ", ".join(canonical) if canonical else "لم يتم التعرّف على أي مادة."
+    if notes:
+        msg += "\nملاحظات: " + "; ".join(notes)
+    await update.message.reply_text(msg + "\n\nما هو التخصص؟")
+    return REG_SPECIALITY
+
+async def reg_speciality(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['reg']['speciality'] = (update.message.text or "").strip()
+    await update.message.reply_text("طريقة الدفع:")
+    return REG_PAYMENT
+
+async def reg_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['reg']['payment'] = (update.message.text or "").strip()
+    await update.message.reply_text("مدة الاشتراك بالأشهر (مثال 1 أو 3) أو أدخل تاريخ الانتهاء بصيغة DD/MM/YYYY:")
+    return REG_PERIOD
+
+async def reg_period(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = (update.message.text or "").strip()
+    register_date = datetime.now().strftime('%Y-%m-%d')
+
+    end_date: Optional[str] = None
+    try:
+        months = int(txt)
+        if months <= 0:
+            raise ValueError
+        end_date = (datetime.now() + timedelta(days=months * 30)).strftime('%Y-%m-%d')
+    except ValueError:
+        try:
+            input_date = datetime.strptime(txt, '%d/%m/%Y').date()
+            end_date = input_date.strftime('%Y-%m-%d')
+        except ValueError:
+            await update.message.reply_text("قيمة غير صحيحة. أرسل عدد الأشهر كرقم أو تاريخًا بصيغة DD/MM/YYYY.")
+            return REG_PERIOD
+
+    r = context.user_data['reg']
+    r.update({
+        'register_date': register_date,
+        'end_date': end_date,
+        'telegram_id': str(update.effective_user.id)
+    })
+    subjects_csv = ", ".join(r.get('subjects', []))
+    summary = (
+        f"يرجى التأكيد:\n"
+        f"الاسم: {r.get('name')}\n"
+        f"الهاتف: {r.get('phone')}\n"
+        f"المستوى: {r.get('niveau')}\n"
+        f"المواد: {subjects_csv or '—'}\n"
+        f"التخصص: {r.get('speciality')}\n"
+        f"الدفع: {r.get('payment')}\n"
+        f"البداية: {r.get('register_date')}\n"
+        f"النهاية: {r.get('end_date')}\n"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("تأكيد", callback_data="reg_yes"),
+         InlineKeyboardButton("إلغاء", callback_data="reg_no")]
+    ])
+    await update.message.reply_text(summary, reply_markup=kb)
+    return REG_CONFIRM
+
+async def reg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == "reg_no":
+        context.user_data.pop('reg', None)
+        await query.edit_message_text("أُلغي التسجيل.")
+        return ConversationHandler.END
+
+    r = context.user_data.get('reg') or {}
+    # Avoid duplicate by ID
+    if _student_exists_by_id(r.get('telegram_id', '')):
+        await query.edit_message_text("أنت مسجّل مسبقًا.")
+        context.user_data.pop('reg', None)
+        return ConversationHandler.END
+
+    subjects = r.get('subjects', [])
+    ensure_subject_channels_rows(r.get('niveau', ''), subjects)
+    subjects_csv = ", ".join(subjects)
+
+    # Write to Students
+    _append_student_row(
+        phone=r.get('phone', ''),
+        name=r.get('name', ''),
+        subjects_csv=subjects_csv,
+        speciality=r.get('speciality', ''),
+        payment=r.get('payment', ''),
+        telegram_id=r.get('telegram_id', ''),
+        register_date=r.get('register_date', ''),
+        end_date=r.get('end_date', ''),
+        niveau=r.get('niveau', '')
+    )
+
+    # Send invites for available groups; collect missing ones
+    subject_map = fetch_subject_channel_links()
+    keys_lower = [ _key_for(r.get('niveau',''), s).lower() for s in subjects ]
+    missing: List[str] = []
+    sent_any = False
+    for key in keys_lower:
+        gid = subject_map.get(key, "")
+        if gid:
+            try:
+                link = await query.get_bot().create_chat_invite_link(
+                    chat_id=_chat_id(gid),
+                    creates_join_request=True
+                )
+                await query.get_bot().send_message(
+                    chat_id=int(r.get('telegram_id', '')),
+                    text=f"رابط الدعوة لمجموعة {key}:\n{link.invite_link}"
+                )
+                sent_any = True
+            except Exception:
+                pass
+        else:
+            # no group yet
+            subj_name = key.split("_", 1)[1]
+            missing.append(subj_name)
+
+    msg = "تم تسجيلك بنجاح! " + ("وأُرسلت روابط الدعوة لِمَن توفّر." if sent_any else "")
+    if missing:
+        msg += "\nلا توجد مجموعة حالياً للمواد: " + ", ".join(missing)
+    await query.edit_message_text(msg)
+
+    context.user_data.pop('reg', None)
+    return ConversationHandler.END
+
 # ===================== App factory (WEBHOOK-READY) =====================
 
 def main(updater_none: bool = False):
@@ -784,7 +1074,7 @@ def main(updater_none: bool = False):
         builder = builder.defaults(Defaults(tzinfo=ZoneInfo("Africa/Algiers")))
     application = builder.build()
 
-    # Conversation for /set (handles callback for niveau + text for subject)
+    # /set conversation (admins)
     set_conv = ConversationHandler(
         entry_points=[CommandHandler("set", set_channel_start, filters=(filters.ChatType.GROUPS & ~filters.SenderChat()))],
         states={
@@ -803,6 +1093,27 @@ def main(updater_none: bool = False):
     )
     application.add_handler(set_conv)
 
+    # /register conversation (students)
+    register_conv = ConversationHandler(
+        entry_points=[CommandHandler("register", register_start)],
+        states={
+            REG_NAME:       [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_name)],
+            REG_PHONE:      [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_phone)],
+            REG_NIVEAU:     [
+                CallbackQueryHandler(reg_niveau, pattern=r"^niv:"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, reg_niveau)
+            ],
+            REG_SUBJECTS:   [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_subjects)],
+            REG_SPECIALITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_speciality)],
+            REG_PAYMENT:    [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_payment)],
+            REG_PERIOD:     [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_period)],
+            REG_CONFIRM:    [CallbackQueryHandler(reg_confirm, pattern=r"^reg_(yes|no)$")],
+        },
+        fallbacks=[CommandHandler("cancel", set_channel_cancel)],
+        allow_reentry=True,
+    )
+    application.add_handler(register_conv)
+
     # Simple commands
     application.add_handler(CommandHandler("subjects", view_subjects))
     application.add_handler(CommandHandler("subscription", check_subscription))
@@ -810,7 +1121,7 @@ def main(updater_none: bool = False):
     application.add_handler(CommandHandler("start", help_command))
     application.add_handler(CommandHandler("myid", myid))
 
-    # Reminders (will run while the service is awake)
+    # Reminders
     application.job_queue.run_once(check_subscriptions_and_send_reminders, 0)
     application.job_queue.run_daily(check_subscriptions_and_send_reminders, time(hour=9, minute=0))
 
