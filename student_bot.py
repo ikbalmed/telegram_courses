@@ -60,7 +60,7 @@ SET_NIVEAU, SET_SUBJECT, SET_CONFIRM = range(3)
 
 # ===================== Google Sheets helpers =====================
 
-def _load_gcp_credentials) -> Credentials:
+def _load_gcp_credentials() -> Credentials:
     path = os.getenv("GOOGLE_CREDENTIALS_FILE")
     if path and os.path.exists(path):
         return Credentials.from_service_account_file(path, scopes=SCOPES)
@@ -381,7 +381,7 @@ async def _broadcast_invites_to_existing_students(
         want_subject = subject_canonical.strip().lower()
 
         sent = failed = 0
-        # create invite once to reduce API calls (can expire; but fine for immediate send)
+        # create invite once to reduce API calls
         try:
             link_obj = await bot.create_chat_invite_link(chat_id=_chat_id(group_chat_id), creates_join_request=True)
             invite_url = link_obj.invite_link
