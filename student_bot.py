@@ -1111,7 +1111,7 @@ async def register_get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("يرجى إدخال رقم هاتف صحيح.")
         return REG_PHONE
     context.user_data['reg']['phone'] = phone
-    await update.message.reply_text("اكتب موادك مفصولة بفواصل (مثال: Math, English):")
+    await update.message.reply_text("اكتب موادك مفصولة بفواصل (مثال: Math, Anglais, Physique, Arab, Francais):")
     return REG_SUBJECTS
 
 async def register_get_subjects(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1354,3 +1354,4 @@ async def prewarm_clients():
 
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _sync)
+
