@@ -337,9 +337,6 @@ def _load_available_subjects_for_niveau(niveau: str) -> Dict[str, str]:
         if not key.startswith(prefix):
             continue
         subj_part = key[len(prefix):]  # e.g., 'Math' or 'Computer_Science'
-        # original casing from sheet is unknown here because we have only lower() keys;
-        # reconstruct Title-like from stored key: use the key as-is after prefix (lower),
-        # but we’ll keep underscores and title-case tokens.
         original = "_".join(w.capitalize() for w in subj_part.split('_'))
         mapping[_subj_norm(subj_part)] = original
     return mapping
@@ -372,7 +369,6 @@ def _match_user_subjects_to_canonical(niveau: str, user_subjects_csv: str) -> Tu
                 matched.append(available[cand[0]])
                 continue
         # still nothing -> keep normalized title-cased version (will be ensured in sheet)
-        # e.g., 'english' -> 'English'
         fallback = "_".join(p.capitalize() for p in tok.split('_') if p)
         if fallback:
             matched.append(fallback)
@@ -381,7 +377,7 @@ def _match_user_subjects_to_canonical(niveau: str, user_subjects_csv: str) -> Tu
 
     return matched, unknown
 
-# ===================== Reminders job (10d + 3d) =====================
+# ===================== Reminders job (10d + 3d), with kicking =====================
 
 async def check_subscriptions_and_send_reminders(context: ContextTypes.DEFAULT_TYPE):
     sheets = setup_sheets()
@@ -413,8 +409,6 @@ async def check_subscriptions_and_send_reminders(context: ContextTypes.DEFAULT_T
         return
 
     today = date.today()
-
-    # Preload group map for potential kicking later
     subject_map = fetch_subject_channel_links()
 
     for sheet_row_num, row in enumerate(rows[1:], start=2):
@@ -441,10 +435,9 @@ async def check_subscriptions_and_send_reminders(context: ContextTypes.DEFAULT_T
         ten_sent   = _to_bool(_safe_cell(row, ten_day_idx, False)) if ten_day_idx   != -1 else False
         three_sent = _to_bool(_safe_cell(row, three_day_idx, False)) if three_day_idx != -1 else False
 
-        # If expired, flip to FALSE and (optionally) kick from channels
+        # If expired, flip to FALSE and kick from subject groups (best-effort)
         if today > end_dt:
             if sub_status == "TRUE":
-                # Flip subscription to FALSE
                 try:
                     col = _col_letter(subscription_idx)
                     sheets.values().update(
@@ -455,7 +448,6 @@ async def check_subscriptions_and_send_reminders(context: ContextTypes.DEFAULT_T
                     ).execute()
                 except Exception:
                     pass
-                # Kick from joined subject channels if any (best-effort)
                 try:
                     niveau = str(_safe_cell(row, niveau_idx, "") or "").strip()
                     subjects_csv = str(_safe_cell(row, subjects_idx, "") or "").strip()
@@ -467,11 +459,10 @@ async def check_subscriptions_and_send_reminders(context: ContextTypes.DEFAULT_T
                             try:
                                 await context.bot.ban_chat_member(chat_id=_chat_id(gid), user_id=int(student_id))
                                 await context.bot.unban_chat_member(chat_id=_chat_id(gid), user_id=int(student_id), only_if_banned=True)
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.debug(f"[kick expired] skip {student_id} from {gid}: {e}")
                 except Exception:
                     pass
-                # Notify
                 try:
                     await context.bot.send_message(
                         chat_id=student_id,
@@ -557,6 +548,41 @@ async def invite_student_to_subject_groups(bot: Bot, telegram_id: str, subject_k
             )
         except Exception as e:
             logger.error(f"[invite_student_to_subject_groups] Could not send invite for {key} to {telegram_id}: {e}")
+
+# ---------- NEW: broadcast invites to existing students after /set ----------
+async def _broadcast_invites_to_existing_students(niveau: str, subject_canonical: str, group_chat_id: Union[int, str], bot: Bot) -> Tuple[int, int]:
+    """
+    After mapping a group to <niveau>_<subject>, send invite link to all subscribed students
+    with matching niveau & subject.
+    Returns (sent_ok, sent_fail).
+    """
+    recipients = _find_zoom_recipients(niveau, subject_canonical)  # reuses filter: niveau + subject, Subscription=TRUE
+    if not recipients:
+        return (0, 0)
+
+    try:
+        invite = await bot.create_chat_invite_link(chat_id=_chat_id(group_chat_id), creates_join_request=True)
+        link = invite.invite_link
+    except Exception as e:
+        logger.warning(f"[broadcast_invites] Could not create invite link for {group_chat_id}: {e}")
+        return (0, len(recipients))
+
+    ok, fail = 0, 0
+    # Pretty subject for message (spaces instead of underscores)
+    pretty_subj = subject_canonical.replace("_", " ")
+    for r in recipients:
+        try:
+            await bot.send_message(
+                chat_id=_chat_id(r["id"]),
+                text=f"تم إنشاء مجموعة لمادة <b>{niveau} – {pretty_subj}</b>.\n"
+                     f"رابط الدعوة: {link}",
+                parse_mode="HTML"
+            )
+            ok += 1
+        except Exception as e:
+            logger.debug(f"[broadcast_invites] fail to {r['id']}: {e}")
+            fail += 1
+    return (ok, fail)
 
 # ===================== Student commands =====================
 
@@ -758,7 +784,7 @@ async def set_channel_get_subject(update: Update, context: ContextTypes.DEFAULT_
             ])
             await update.message.reply_text(
                 f"⚠️ هذه المجموعة معيّنة بالفعل إلى <b>{conflict_key}</b>.\n"
-                f"هل تريد تعيينها إلى <b>{key_canonical}</b> رغم ذلك؟",
+                f"هل تريد تعيينها إلى <b>{key_canonical}</b> رغم التداخل؟",
                 reply_markup=kb,
                 parse_mode="HTML"
             )
@@ -788,6 +814,18 @@ async def set_channel_get_subject(update: Update, context: ContextTypes.DEFAULT_
                 parse_mode="HTML"
             )
 
+        # NEW: After mapping, notify existing subscribed students
+        sent, failed = await _broadcast_invites_to_existing_students(
+            niveau=niveau,
+            subject_canonical=key_canonical.split("_", 1)[1],  # use canonical subject part (with underscores)
+            group_chat_id=chat.id,
+            bot=context.bot
+        )
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=f"تم إرسال روابط الدعوة للطلاب الحاليين: نجح {sent} | فشل {failed}."
+        )
+
     except Exception as e:
         logger.exception("[/set] Exception while setting channel:")
         await update.message.reply_text(f"❌ تعذّر ضبط المعرّف: {e}")
@@ -805,18 +843,19 @@ async def set_channel_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.edit_message_text("لا توجد عملية مُعلّقة.")
         return ConversationHandler.END
 
-    if data == "set_confirm_no":
-        context.user_data.pop('pending_set', None)
-        context.user_data.pop('set_niveau', None)
-        await query.edit_message_text("تم الإلغاء.")
-        return ConversationHandler.END
-
     try:
         sheets = setup_sheets()
         key_canonical = pending['key_canonical']
         target_row_index = pending['target_row_index']
         chat_id_to_store = pending['chat_id_to_store']
 
+        if data == "set_confirm_no":
+            context.user_data.pop('pending_set', None)
+            context.user_data.pop('set_niveau', None)
+            await query.edit_message_text("تم الإلغاء.")
+            return ConversationHandler.END
+
+        # write mapping
         if target_row_index is None:
             sheets.values().append(
                 spreadsheetId=SPREADSHEET_ID,
@@ -840,6 +879,23 @@ async def set_channel_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"✅ تم تحديث الربط لـ <b>{key_canonical}</b> بهذه المجموعة (رغم التداخل).",
                 parse_mode="HTML"
             )
+
+        # NEW: notify existing subscribed students
+        try:
+            niveau = key_canonical.split("_", 1)[0]
+            subj_canon = key_canonical.split("_", 1)[1]
+            sent, failed = await _broadcast_invites_to_existing_students(
+                niveau=niveau,
+                subject_canonical=subj_canon,
+                group_chat_id=query.message.chat.id,
+                bot=context.bot
+            )
+            await context.bot.send_message(
+                chat_id=query.message.chat.id,
+                text=f"تم إرسال روابط الدعوة للطلاب الحاليين: نجح {sent} | فشل {failed}."
+            )
+        except Exception as e:
+            logger.debug(f"[/set_confirm] broadcast invite failed: {e}")
 
     except Exception as e:
         logger.exception("[/set_confirm] Exception while confirming set:")
@@ -1169,13 +1225,42 @@ async def register_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Send invites (only for subjects that have a group id)
     keys = [f"{reg['niveau']}_{re.sub(r'\\s+', '_', s.strip())}".lower() for s in subjects_canon]
-    try:
-        await invite_student_to_subject_groups(context.bot, reg['student_id'], keys)
-    except Exception as e:
-        logger.warning(f"[register_confirm] Invite sending failed: {e}")
+    subject_map = fetch_subject_channel_links()
+    sent = 0
+    missing_subjects: List[str] = []
+
+    # Try invite per key; track which subjects don't have a group
+    for subj in subjects_canon:
+        key = f"{reg['niveau']}_{re.sub(r'\\s+', '_', subj.strip())}".lower()
+        group_id = subject_map.get(key)
+        if group_id:
+            try:
+                invite_link = await context.bot.create_chat_invite_link(
+                    chat_id=_chat_id(group_id),
+                    creates_join_request=True
+                )
+                await context.bot.send_message(
+                    chat_id=int(reg['student_id']),
+                    text=f"رابط دعوة مادة <b>{subj.replace('_',' ')}</b>: {invite_link.invite_link}",
+                    parse_mode="HTML"
+                )
+                sent += 1
+            except Exception as e:
+                logger.debug(f"[register_confirm] invite send failed for {key}: {e}")
+        else:
+            missing_subjects.append(subj.replace("_"," "))
+
+    # Final message summarizing invites vs. missing groups
+    if sent == 0 and missing_subjects:
+        msg = "✅ تم تسجيلك بنجاح!\nلكن لا توجد مجموعة متاحة حاليًا للمواد:\n• " + "\n• ".join(missing_subjects) + "\nسنبلغك عند توفرها."
+    elif missing_subjects:
+        msg = ("✅ تم تسجيلك بنجاح! تم إرسال روابط الدعوة للمواد المتاحة.\n"
+               "المواد التالية لا توجد لها مجموعة حاليًا:\n• " + "\n• ".join(missing_subjects))
+    else:
+        msg = "✅ تم تسجيلك بنجاح! تم إرسال جميع روابط الدعوة."
+    await query.edit_message_text(msg, parse_mode="HTML")
 
     context.user_data.pop('reg', None)
-    await query.edit_message_text("✅ تم تسجيلك بنجاح! تم إرسال روابط الدعوة للمواد المتوفرة.")
     return ConversationHandler.END
 
 # ===================== App factory (WEBHOOK-READY) =====================
@@ -1257,11 +1342,8 @@ async def prewarm_clients():
     """
     def _sync():
         try:
-            # Build client with cache disabled (avoids extra disk i/o and warnings)
             creds = _load_gcp_credentials()
             service = build('sheets', 'v4', credentials=creds, cache_discovery=False)
-
-            # Small, fast call
             rng = f"{STUDENT_TABLE_NAME}!A1:A1"
             service.spreadsheets().values().get(
                 spreadsheetId=SPREADSHEET_ID,
