@@ -89,6 +89,48 @@ def _load_gcp_credentials() -> Credentials:
 
     raise RuntimeError("No Google credentials provided.")
 
+def _detect_bad_separators(raw: str) -> Optional[str]:
+    """
+    Return an error message if the input uses non-English commas or other separators.
+    Allowed separator for multiple subjects is ONLY the ASCII comma ','.
+    """
+    if raw is None:
+        return "الرجاء فصل المواد بالفاصلة الإنجليزية فقط: , مثال: Math, Anglais"
+
+    text = str(raw)
+
+    # Disallow common non-ASCII commas & separators
+    forbidden_chars = {
+        '\u060C': '،',   # Arabic comma
+        '\u061B': '؛',   # Arabic semicolon
+        '\uFF0C': '，',   # Fullwidth comma
+        '\u3001': '、',   # Ideographic comma
+        ';': ';',
+        '؛': '؛',
+        '،': '،',
+        '|': '|',
+        '/': '/',
+        '\\': '\\',
+        ':': ':',
+        '·': '·',
+        '•': '•',
+    }
+    for ch in forbidden_chars:
+        if ch in text:
+            return "⚠️ الرجاء استخدام الفاصلة الإنجليزية فقط للفصل بين المواد: , \nمثال صحيح: Math, Anglais"
+
+    # Disallow using words as separators
+    lower = text.lower()
+    if " و " in text or " and " in lower:
+        return "⚠️ لا تستخدم كلمات للربط. استخدم الفاصلة الإنجليزية فقط: , \nمثال صحيح: Math, Anglais"
+
+    # Disallow newlines as separators
+    if '\n' in text or '\r' in text:
+        return "⚠️ رجاءً اكتب المواد في سطر واحد وافصل بينها بالفاصلة الإنجليزية: ,"
+
+    return None
+
+
 def setup_sheets():
     creds = _load_gcp_credentials()
     service = build('sheets', 'v4', credentials=creds, cache_discovery=False)
@@ -997,16 +1039,39 @@ def _validate_and_map_labels(input_list: List[str]) -> Tuple[List[str], List[str
 
 async def reg_subjects(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = (update.message.text or "").strip()
-    typed = [s.strip() for s in raw.split(",") if s.strip()]
+
+    # Must use ASCII comma only
+    sep_err = _detect_bad_separators(raw)
+    if sep_err:
+        await update.message.reply_text(
+            sep_err + "\n\nالمواد المسموحة فقط:\n(Francais, Anglais, Science, Math, Physique, Histoire Geo)\n"
+            "أعد المحاولة:"
+        )
+        return REG_SUBJECTS
+
+    # Split strictly on ','
+    parts_raw = [s.strip() for s in raw.split(",")]
+
+    # Detect empty tokens from patterns like "Math,,Anglais" or leading/trailing comma
+    if any(p == "" for p in parts_raw):
+        await update.message.reply_text(
+            "⚠️ هناك فاصلة زائدة. تأكد من عدم وجود فاصلة في البداية/النهاية أو فاصلتين متتاليتين.\n"
+            "مثال صحيح: Math, Anglais\nأعد المحاولة:"
+        )
+        return REG_SUBJECTS
+
+    typed = [p for p in parts_raw if p]  # cleaned list
     niveau = context.user_data['reg'].get('niveau', '')
 
+    # Map to allowed labels
     labels_ok, notes, invalid = _validate_and_map_labels(typed)
     if invalid:
         await update.message.reply_text(
             "بعض المواد غير معروفة أو لا تطابق القائمة المسموحة:\n"
             f"- {', '.join(invalid)}\n\n"
             "استخدم فقط الأسماء التالية بالضبط:\n"
-            "(Francais, Anglais, Science, Math, Physique, Histoire Geo)"
+            "(Francais, Anglais, Science, Math, Physique, Histoire Geo)\n"
+            "أعد المحاولة:"
         )
         return REG_SUBJECTS
 
@@ -1024,6 +1089,7 @@ async def reg_subjects(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += "\nملاحظات: " + "; ".join(notes)
     await update.message.reply_text(msg + "\n\nما هو التخصص؟")
     return REG_SPECIALITY
+
 
 async def reg_speciality(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['reg']['speciality'] = (update.message.text or "").strip()
@@ -1197,8 +1263,26 @@ async def addsub_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = st.get("uid", "")
 
     raw = (update.message.text or "").strip()
-    label, reason = _label_from_input(raw)
 
+    # This step expects a SINGLE subject. Any commas or other separators are errors.
+    if ',' in raw:
+        await update.message.reply_text(
+            "⚠️ أرسل مادة واحدة فقط بدون أي فواصل.\n"
+            "اختر من:\n(Francais, Anglais, Science, Math, Physique, Histoire Geo)"
+        )
+        return ADD_SUBJECT_INPUT
+
+    # Also reject non-English separators/odd punctuation for a single subject
+    sep_err = _detect_bad_separators(raw)
+    if sep_err:
+        await update.message.reply_text(
+            "⚠️ أرسل مادة واحدة فقط بدون فواصل أو فواصل غير إنجليزية.\n"
+            "اختر من:\n(Francais, Anglais, Science, Math, Physique, Histoire Geo)"
+        )
+        return ADD_SUBJECT_INPUT
+
+    # Map to an allowed label
+    label, reason = _label_from_input(raw)
     if (not label) or (label not in ALLOWED_LABELS):
         await update.message.reply_text(
             "المادة غير معروفة أو لا تطابق القائمة المسموحة.\n"
@@ -1246,6 +1330,7 @@ async def addsub_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
     context.user_data.pop('addsub', None)
     return ConversationHandler.END
+
 
 # ===================== App factory (WEBHOOK-READY) =====================
 
@@ -1342,3 +1427,4 @@ async def prewarm_clients():
 
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _sync)
+
