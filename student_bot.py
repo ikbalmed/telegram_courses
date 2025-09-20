@@ -253,54 +253,101 @@ def ensure_subject_channels_rows(niveau: str, subjects: List[str]):
             body={'values': to_append}
         ).execute()
 
-# ---------- Registration helpers: subject canonicalization ----------
-SUBJECT_SYNONYMS: Dict[str, List[str]] = {
-    "Math":    ["math", "maths", "mathematiques", "mathematique", "mat", "رياضيات"],
-    "Physic":  ["physic", "physics", "physique", "phy", "فيزياء"],
-    "English": ["english", "anglais", "englich", "inglish", "ang", "انجليزي", "انجليزية"],
-    "French":  ["french", "francais", "français", "فرنسية"],
-    "Science": ["science", "sciences", "sci", "علوم"],
-    "History": ["history", "histoire", "تاريخ"],
-    "Geography": ["geography", "geographie", "geo", "جغرافيا"],
+# ---------- Allowed subject labels & mapping ----------
+
+ALLOWED_LABELS: List[str] = ["Francais", "Anglais", "Science", "Math", "Physique", "Histoire Geo"]
+
+# Under-the-hood subjects used in sheet keys:
+#   Francais -> French
+#   Anglais  -> English
+#   Physique -> Physic
+#   Math     -> Math
+#   Science  -> Science
+#   Histoire Geo -> History & Geography (two)
+LABEL_TO_UNDERLYING: Dict[str, List[str]] = {
+    "Francais": ["French"],
+    "Anglais": ["English"],
+    "Physique": ["Physic"],
+    "Math": ["Math"],
+    "Science": ["Science"],
+    "Histoire Geo": ["History", "Geography"],
 }
 
-def _available_subjects_for_niveau(niveau: str) -> List[str]:
-    """Pull distinct subjects that already exist in Subjects_Channels for this niveau."""
-    mapping = fetch_subject_channel_links()
-    lvl = niveau.strip().lower() + "_"
-    found = []
-    for key in mapping.keys():
-        if key.startswith(lvl):
-            subj = key.split("_", 1)[1]
-            found.append(subj)
-    unique = sorted({s.replace("_", " ") for s in found})
-    return [s.replace(" ", "_") for s in unique]
+# Synonyms/typos -> label (only map if it clearly points to one of ALLOWED_LABELS)
+SYN_TO_LABEL: Dict[str, str] = {
+    # Anglais
+    "english": "Anglais", "anglais": "Anglais", "englich": "Anglais", "inglish": "Anglais",
+    "ang": "Anglais", "انجليزي": "Anglais", "انجليزية": "Anglais",
 
-def _canonicalize_subject_for_niveau(niveau: str, raw_subj: str) -> Tuple[str, Optional[str]]:
+    # Francais
+    "french": "Francais", "francais": "Francais", "français": "Francais", "francais'": "Francais",
+    "فرنسية": "Francais",
+
+    # Physique
+    "physic": "Physique", "physics": "Physique", "physique": "Physique", "فيزياء": "Physique",
+
+    # Math
+    "math": "Math", "maths": "Math", "mathematiques": "Math", "mathematique": "Math", "mat": "Math", "رياضيات": "Math",
+
+    # Science
+    "science": "Science", "sciences": "Science", "sci": "Science", "علوم": "Science",
+}
+
+def _looks_like_histoire_geo(text: str) -> bool:
+    t = text.lower().strip()
+    t_nospace = re.sub(r"\s+", "", t)
+    patterns = [
+        "histoire geo", "histoire-geo", "histoiregéographie", "histoire et geo",
+        "history geo", "history geography", "history&geography", "histoiregeo",
+        "histoire et géo", "geo histoire", "histoire & geo",
+    ]
+    if any(p.replace(" ", "") in t_nospace for p in patterns):
+        return True
+    # If it contains both roots "histoire" and "geo" (or "history" and "geo")
+    if ("histoire" in t and "geo" in t) or ("history" in t and "geo" in t):
+        return True
+    return False
+
+def _label_from_input(raw: str) -> Tuple[Optional[str], Optional[str]]:
     """
-    Returns (canonical_subject, reason) where reason is None if direct,
-    or a short note like 'synonym'/'fuzzy' indicating adjustment.
+    Try to map input text to one of ALLOWED_LABELS.
+    Return (label, reason) where reason in {"synonym","fuzzy","combo"} or None.
+    If no mapping is possible, returns (None, None).
     """
-    txt = raw_subj.strip().lower().replace("’", "'")
-    # "Histoire Geo" => two subjects handled elsewhere
-    if "histoire" in txt and "geo" in txt:
-        return "HistoireGeo", "combo"
+    txt = (raw or "").strip()
+    if not txt:
+        return None, None
 
-    txt_compact = re.sub(r'\s+', '', txt)
-    for canon, variants in SUBJECT_SYNONYMS.items():
-        for v in variants:
-            if txt == v or txt_compact == v.replace(" ", ""):
-                return canon, "synonym"
+    if _looks_like_histoire_geo(txt):
+        return "Histoire Geo", "combo"
 
-    existing = _available_subjects_for_niveau(niveau)
-    if existing:
-        lower_map = {e.lower(): e for e in existing}
-        matches = difflib.get_close_matches(txt.replace(" ", "_"), list(lower_map.keys()), n=1, cutoff=0.6)
-        if matches:
-            m = matches[0]
-            return lower_map[m].replace("_", " ").title().replace(" ", ""), "fuzzy"
+    base = txt.lower().replace("’", "'").strip()
+    base_compact = re.sub(r"\s+", "", base)
 
-    return raw_subj.strip().title().replace(" ", ""), None
+    if base in SYN_TO_LABEL:
+        return SYN_TO_LABEL[base], "synonym"
+    if base_compact in SYN_TO_LABEL:
+        return SYN_TO_LABEL[base_compact], "synonym"
+
+    # Fuzzy to allowed labels (strictly within ALLOWED_LABELS)
+    match = difflib.get_close_matches(txt, ALLOWED_LABELS, n=1, cutoff=0.75)
+    if match:
+        return match[0], "fuzzy"
+
+    return None, None
+
+def _underlying_for_labels(labels: List[str]) -> List[str]:
+    out: List[str] = []
+    for lb in labels:
+        out.extend(LABEL_TO_UNDERLYING.get(lb, []))
+    # dedupe, keep order
+    seen = set()
+    dedup = []
+    for s in out:
+        if s not in seen:
+            seen.add(s)
+            dedup.append(s)
+    return dedup
 
 # ===================== Reminders job (10d + 3d) =====================
 
@@ -358,7 +405,7 @@ async def check_subscriptions_and_send_reminders(context: ContextTypes.DEFAULT_T
             if sub_status == "TRUE":
                 try:
                     col = _col_letter(subscription_idx)
-                    sheets.values().update(
+                    setup_sheets().values().update(
                         spreadsheetId=SPREADSHEET_ID,
                         range=f"{STUDENT_TABLE_NAME}!{col}{sheet_row_num}",
                         valueInputOption="RAW",
@@ -386,7 +433,7 @@ async def check_subscriptions_and_send_reminders(context: ContextTypes.DEFAULT_T
                           f"متبقّي {days_left} يوم/أيام. يرجى التجديد قريبًا.")
                 )
                 col = _col_letter(ten_day_idx)
-                sheets.values().update(
+                setup_sheets().values().update(
                     spreadsheetId=SPREADSHEET_ID,
                     range=f"{STUDENT_TABLE_NAME}!{col}{sheet_row_num}",
                     valueInputOption="RAW",
@@ -402,7 +449,7 @@ async def check_subscriptions_and_send_reminders(context: ContextTypes.DEFAULT_T
                        f"⏳ سينتهي اشتراكك في {end_dt.isoformat()}. متبقّي {days_left} يوم/أيام.")
                 await context.bot.send_message(chat_id=student_id, text=msg)
                 col = _col_letter(three_day_idx)
-                sheets.values().update(
+                setup_sheets().values().update(
                     spreadsheetId=SPREADSHEET_ID,
                     range=f"{STUDENT_TABLE_NAME}!{col}{sheet_row_num}",
                     valueInputOption="RAW",
@@ -529,7 +576,7 @@ async def view_subjects(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ليس لديك اشتراك فعّال حاليًا.")
         return
 
-    subjects: List[str] = info["subjects"]  # type: ignore
+    subjects: List[str] = info["subjects"]  # underlying tokens
     niveau: str = str(info.get("niveau") or "").strip()
 
     if not subjects:
@@ -917,34 +964,62 @@ async def reg_niveau(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data['reg']['niveau'] = niv
     await (update.effective_message or update.callback_query.message).reply_text(
-        "اكتب موادك مفصولة بفواصل (الاختيارات المقترحة: Francais, Anglais, Science, Math, Physique, Histoire Geo)"
+        "اكتب موادك مفصولة بفواصل (الاختيارات المسموحة فقط: Francais, Anglais, Science, Math, Physique, Histoire Geo)"
     )
     return REG_SUBJECTS
+
+def _validate_and_map_labels(input_list: List[str]) -> Tuple[List[str], List[str], List[str]]:
+    """
+    Returns (labels_ok, labels_notes, invalid_inputs)
+      - labels_ok: final labels from ALLOWED_LABELS
+      - labels_notes: optional notes like corrections applied
+      - invalid_inputs: raw tokens we could not map to allowed labels
+    """
+    labels_ok: List[str] = []
+    notes: List[str] = []
+    invalid: List[str] = []
+
+    for raw in input_list:
+        label, reason = _label_from_input(raw)
+        if not label or label not in ALLOWED_LABELS:
+            invalid.append(raw)
+            continue
+        if label not in labels_ok:
+            labels_ok.append(label)
+        if reason == "synonym":
+            notes.append(f"{raw} → {label}")
+        elif reason == "fuzzy":
+            notes.append(f"{raw} → {label} (تصحيح إملائي)")
+        elif reason == "combo":
+            notes.append(f"{raw} → {label}")
+
+    return labels_ok, notes, invalid
 
 async def reg_subjects(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = (update.message.text or "").strip()
     typed = [s.strip() for s in raw.split(",") if s.strip()]
     niveau = context.user_data['reg'].get('niveau', '')
 
-    canonical: List[str] = []
-    notes = []
-    for s in typed:
-        canon, reason = _canonicalize_subject_for_niveau(niveau, s)
-        if canon == "HistoireGeo":
-            for comb in ["History", "Geography"]:
-                if comb not in canonical:
-                    canonical.append(comb)
-            notes.append(f"{s} → History & Geography")
-            continue
-        if canon not in canonical:
-            canonical.append(canon)
-        if reason:
-            notes.append(f"{s} → {canon} ({'مرادف' if reason=='synonym' else 'تقريب'})")
+    labels_ok, notes, invalid = _validate_and_map_labels(typed)
+    if invalid:
+        await update.message.reply_text(
+            "بعض المواد غير معروفة أو لا تطابق القائمة المسموحة:\n"
+            f"- {', '.join(invalid)}\n\n"
+            "استخدم فقط الأسماء التالية بالضبط:\n"
+            "(Francais, Anglais, Science, Math, Physique, Histoire Geo)"
+        )
+        return REG_SUBJECTS
 
-    context.user_data['reg']['subjects'] = canonical
-    ensure_subject_channels_rows(niveau, canonical)
+    # Convert labels -> underlying subjects used in sheet keys
+    underlying = _underlying_for_labels(labels_ok)
 
-    msg = "تم تسجيل المواد المبدئية: " + ", ".join(canonical) if canonical else "لم يتم التعرّف على أي مادة."
+    context.user_data['reg']['labels'] = labels_ok
+    context.user_data['reg']['subjects'] = underlying
+
+    # Ensure rows for channels
+    ensure_subject_channels_rows(niveau, underlying)
+
+    msg = "تم قبول المواد: " + (", ".join(labels_ok) if labels_ok else "—")
     if notes:
         msg += "\nملاحظات: " + "; ".join(notes)
     await update.message.reply_text(msg + "\n\nما هو التخصص؟")
@@ -984,13 +1059,15 @@ async def reg_period(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'end_date': end_date,
         'telegram_id': str(update.effective_user.id)
     })
-    subjects_csv = ", ".join(r.get('subjects', []))
+    labels_ok = r.get('labels', [])
+    underlying = r.get('subjects', [])
+    subjects_csv = ", ".join(underlying)
     summary = (
         f"يرجى التأكيد:\n"
         f"الاسم: {r.get('name')}\n"
         f"الهاتف: {r.get('phone')}\n"
         f"المستوى: {r.get('niveau')}\n"
-        f"المواد: {subjects_csv or '—'}\n"
+        f"المواد: {', '.join(labels_ok) if labels_ok else '—'}\n"
         f"التخصص: {r.get('speciality')}\n"
         f"الدفع: {r.get('payment')}\n"
         f"البداية: {r.get('register_date')}\n"
@@ -1017,9 +1094,10 @@ async def reg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('reg', None)
         return ConversationHandler.END
 
-    subjects = r.get('subjects', [])
-    ensure_subject_channels_rows(r.get('niveau', ''), subjects)
-    subjects_csv = ", ".join(subjects)
+    labels_ok: List[str] = r.get('labels', [])
+    underlying: List[str] = r.get('subjects', [])
+    ensure_subject_channels_rows(r.get('niveau', ''), underlying)
+    subjects_csv = ", ".join(underlying)
 
     _append_student_row(
         phone=r.get('phone', ''),
@@ -1034,31 +1112,35 @@ async def reg_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     subject_map = fetch_subject_channel_links()
-    keys_lower = [ _key_for(r.get('niveau',''), s).lower() for s in subjects ]
-    missing: List[str] = []
+
+    # Send invite links where available; compute missing labels
+    missing_labels: List[str] = []
     sent_any = False
-    for key in keys_lower:
-        gid = subject_map.get(key, "")
-        if gid:
-            try:
-                link = await query.get_bot().create_chat_invite_link(
-                    chat_id=_chat_id(gid),
-                    creates_join_request=True
-                )
-                await query.get_bot().send_message(
-                    chat_id=int(r.get('telegram_id', '')),
-                    text=f"رابط الدعوة لمجموعة {key}:\n{link.invite_link}"
-                )
-                sent_any = True
-            except Exception:
-                pass
-        else:
-            subj_name = key.split("_", 1)[1]
-            missing.append(subj_name)
+    for label in labels_ok:
+        had_link_for_label = False
+        for subj in LABEL_TO_UNDERLYING.get(label, []):
+            key = _key_for(r.get('niveau',''), subj).lower()
+            gid = subject_map.get(key, "")
+            if gid:
+                try:
+                    link = await query.get_bot().create_chat_invite_link(
+                        chat_id=_chat_id(gid),
+                        creates_join_request=True
+                    )
+                    await query.get_bot().send_message(
+                        chat_id=int(r.get('telegram_id', '')),
+                        text=f"رابط الدعوة لمجموعة {key}:\n{link.invite_link}"
+                    )
+                    had_link_for_label = True
+                    sent_any = True
+                except Exception:
+                    pass
+        if not had_link_for_label:
+            missing_labels.append(label)
 
     msg = "تم تسجيلك بنجاح! " + ("وأُرسلت روابط الدعوة لِمَن توفّر." if sent_any else "")
-    if missing:
-        msg += "\nلا توجد مجموعة حالياً للمواد: " + ", ".join(missing)
+    if missing_labels:
+        msg += "\nلا توجد مجموعة حالياً للمواد: " + ", ".join(missing_labels)
     await query.edit_message_text(msg)
 
     context.user_data.pop('reg', None)
@@ -1095,36 +1177,14 @@ async def addsub_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data['addsub'] = {
         "niveau": info.get("niveau", ""),
-        "current": info.get("subjects", []),
+        "current": info.get("subjects", []),  # underlying tokens
         "uid": uid
     }
     await query.edit_message_text(
-        "أرسل مادة واحدة من القائمة التالية:\n"
+        "أرسل مادة واحدة فقط من القائمة المسموحة:\n"
         "(Francais, Anglais, Science, Math, Physique, Histoire Geo)"
     )
     return ADD_SUBJECT_INPUT
-
-def _map_addsub_input(niveau: str, text: str) -> List[str]:
-    """Return canonical subjects to add (may be 1 or 2 if Histoire Geo). Empty if can't map."""
-    canon, reason = _canonicalize_subject_for_niveau(niveau, text)
-    if canon == "HistoireGeo":
-        return ["History", "Geography"]
-    # Force-map top requested labels
-    t = text.strip().lower()
-    if t in {"francais"}:
-        return ["French"]
-    if t in {"anglais"}:
-        return ["English"]
-    if t in {"physique"}:
-        return ["Physic"]
-    if t in {"math"}:
-        return ["Math"]
-    if t in {"science"}:
-        return ["Science"]
-    if t in {"histoire geo", "histoiregeo", "history geo", "historygeo", "geo histoire"}:
-        return ["History", "Geography"]
-    # Fallback to canonicalize result
-    return [canon] if canon else []
 
 async def addsub_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st = context.user_data.get('addsub') or {}
@@ -1133,36 +1193,37 @@ async def addsub_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     niveau = st.get("niveau", "")
-    current: List[str] = st.get("current", [])
+    current_underlying: List[str] = st.get("current", [])
     uid = st.get("uid", "")
 
     raw = (update.message.text or "").strip()
-    to_add = _map_addsub_input(niveau, raw)
+    label, reason = _label_from_input(raw)
 
-    if not to_add:
+    if (not label) or (label not in ALLOWED_LABELS):
         await update.message.reply_text(
-            "لم أفهم المادة. أرسل مادة واحدة من:\n(Francais, Anglais, Science, Math, Physique, Histoire Geo)"
+            "المادة غير معروفة أو لا تطابق القائمة المسموحة.\n"
+            "استخدم فقط:\n(Francais, Anglais, Science, Math, Physique, Histoire Geo)"
         )
         return ADD_SUBJECT_INPUT
 
-    # Merge & dedupe
-    new_subjects = current[:]
-    for s in to_add:
-        if s not in new_subjects:
-            new_subjects.append(s)
+    underlying_to_add = LABEL_TO_UNDERLYING.get(label, [])
+    # Merge & dedupe (underlying tokens)
+    new_underlying = current_underlying[:]
+    for s in underlying_to_add:
+        if s not in new_underlying:
+            new_underlying.append(s)
 
     # Update sheet
-    csv_val = ", ".join(new_subjects)
+    csv_val = ", ".join(new_underlying)
     if not _update_student_subjects_csv(uid, csv_val):
         await update.message.reply_text("تعذّر تحديث موادك. حاول لاحقًا.")
         return ConversationHandler.END
 
     # Ensure channels rows & send invites where available
-    ensure_subject_channels_rows(niveau, to_add)
+    ensure_subject_channels_rows(niveau, underlying_to_add)
     subject_map = fetch_subject_channel_links()
-    missing = []
-    sent_any = False
-    for s in to_add:
+    had_link_for_label = False
+    for s in underlying_to_add:
         key = _key_for(niveau, s).lower()
         gid = subject_map.get(key, "")
         if gid:
@@ -1175,15 +1236,13 @@ async def addsub_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=int(uid),
                     text=f"رابط الدعوة لمجموعة {key}:\n{link.invite_link}"
                 )
-                sent_any = True
+                had_link_for_label = True
             except Exception:
                 pass
-        else:
-            missing.append(s)
 
-    msg = f"تمت إضافة المادة{'ين' if len(to_add)>1 else ''} إلى اشتراكك: {', '.join(to_add)}."
-    if missing:
-        msg += "\nلا توجد مجموعة حالياً للمواد: " + ", ".join(missing)
+    msg = f"تمت إضافة المادة إلى اشتراكك: {label}."
+    if not had_link_for_label:
+        msg += "\nلا توجد مجموعة حالياً لهذه المادة."
     await update.message.reply_text(msg)
     context.user_data.pop('addsub', None)
     return ConversationHandler.END
